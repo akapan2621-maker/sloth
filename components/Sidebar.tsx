@@ -6,8 +6,10 @@ import {
   Bot,
   ChevronLeft,
   ChevronRight,
+  Columns2,
   Compass,
   FolderOpen,
+  LogOut,
   MessageSquarePlus,
   MoreHorizontal,
   Pencil,
@@ -18,6 +20,8 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 
+import Dropdown from "@/components/ui/Dropdown";
+import { useAuth } from "@/context/AuthContext";
 import { useWorkspace } from "@/context/WorkspaceContext";
 import { cn, formatRelativeTime } from "@/lib/utils";
 
@@ -36,6 +40,8 @@ interface SidebarProps {
   onToggleCollapsed: () => void;
   onOpenSearch: () => void;
   onOpenSettings: () => void;
+  splitActive?: boolean;
+  onToggleSplit?: () => void;
 }
 
 const PRIMARY_NAV: {
@@ -61,10 +67,21 @@ export function Sidebar({
   onToggleCollapsed,
   onOpenSearch,
   onOpenSettings,
+  splitActive,
+  onToggleSplit,
 }: SidebarProps) {
   const { chats, selectChat, renameChat, deleteChat, spaces, newChat, activeChatId } =
     useWorkspace();
+  const { user, signOutUser, mode } = useAuth();
   const [menuFor, setMenuFor] = useState<string | null>(null);
+
+  const initials =
+    (user?.name || user?.email || "G")
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase())
+      .join("") || "G";
 
   const handleNewChat = () => {
     newChat();
@@ -172,6 +189,30 @@ export function Sidebar({
             ) : null}
           </button>
         ))}
+
+        {onToggleSplit ? (
+          <button
+            type="button"
+            onClick={onToggleSplit}
+            className={cn(
+              "flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-[13px] font-medium transition",
+              splitActive
+                ? "bg-purple-50 text-purple-800 ring-1 ring-purple-100"
+                : "text-slate-600 hover:bg-slate-50 hover:text-slate-900",
+            )}
+            title="Split view: chat and Spaces side by side"
+          >
+            <Columns2 className="h-4 w-4 shrink-0" />
+            {!collapsed ? (
+              <>
+                <span>{splitActive ? "Exit split view" : "Split view"}</span>
+                <span className="ml-auto rounded-full bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-400">
+                  +
+                </span>
+              </>
+            ) : null}
+          </button>
+        ) : null}
       </nav>
 
       <div className="mx-3 my-3 border-t border-slate-100" />
@@ -280,38 +321,65 @@ export function Sidebar({
         <div className="flex-1" />
       )}
 
-      {/* Profile card --------------------------------------------------- */}
+      {/* Profile / account menu ---------------------------------------------- */}
       <div className="border-t border-slate-100 p-3">
-        <div
-          className={cn(
-            "flex items-center gap-2.5 rounded-xl p-2 transition hover:bg-slate-50",
-            !collapsed && "bg-slate-50/60",
-          )}
+        <Dropdown
+          align="left"
+          width={collapsed ? "w-56" : "w-64"}
+          className={cn(collapsed ? "px-0" : "", "block")}
+          trigger={
+            <div
+              className={cn(
+                "flex w-full items-center gap-2.5 rounded-xl p-2 text-left transition hover:bg-slate-50",
+                !collapsed && "bg-slate-50/60",
+              )}
+            >
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-tr from-purple-600 via-pink-500 to-indigo-600 text-[11px] font-bold text-white shadow-soft">
+                {initials}
+              </span>
+              {!collapsed ? (
+                <>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[12px] font-semibold leading-[1.25] text-slate-800">
+                      {user?.name || "Guest"}
+                    </p>
+                    <p className="truncate text-[11px] leading-tight text-slate-400">
+                      {user?.kind === "supabase"
+                        ? user.email
+                        : user?.kind === "local"
+                          ? user.email
+                          : "local session"}
+                    </p>
+                  </div>
+                  <MoreHorizontal className="h-4 w-4 shrink-0 text-slate-400" />
+                </>
+              ) : null}
+            </div>
+          }
         >
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-tr from-purple-600 via-pink-500 to-indigo-600 text-[11px] font-bold text-white shadow-soft">
-            AP
-          </span>
-          {!collapsed ? (
-            <>
-              <div className="min-w-0 flex-1">
-                <p className="text-[12px] font-semibold leading-[1.25] text-slate-800">
-                  Akapan Rattanadilok Na Phuket
-                </p>
-                <p className="truncate text-[11px] leading-tight text-slate-400">
-                  akapan2621
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={onOpenSettings}
-                aria-label="Settings"
-                className="shrink-0 rounded-lg p-1.5 text-slate-400 transition hover:bg-white hover:text-slate-700"
-              >
-                <Settings2 className="h-4 w-4" />
-              </button>
-            </>
-          ) : null}
-        </div>
+          <div className="px-2 pb-1.5 pt-1 text-[11px] leading-4 text-slate-400">
+            {user?.kind === "supabase"
+              ? "Signed in via Supabase — this account syncs to the cloud."
+              : user?.kind === "local"
+                ? "Local account — chats, Spaces and files for this login are kept in this browser only."
+                : "Guest — uses the shared local workspace of this browser."}
+          </div>
+          <div className="my-1 border-t border-slate-100" />
+          <button
+            type="button"
+            onClick={() => {
+              void signOutUser();
+            }}
+            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[12.5px] text-slate-600 transition hover:bg-rose-50 hover:text-rose-600"
+            aria-label="Sign out"
+          >
+            <LogOut className="h-3.5 w-3.5" />
+            Sign out
+          </button>
+          <p className="px-2.5 pb-1 pt-1 text-[10.5px] text-slate-400">
+            Signing out keeps this account&apos;s data. Next sign-in restores it.
+          </p>
+        </Dropdown>
       </div>
     </motion.aside>
   );

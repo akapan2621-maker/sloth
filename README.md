@@ -14,6 +14,8 @@ Built for the **Vercel Hobby** and **Supabase free tiers**, powered by the
 | Area | Detail |
 | --- | --- |
 | **Chat** | Streaming responses from the Kilo Code gateway, Markdown + GFM tables, syntax-highlighted code blocks with copy, per-answer citation drawer. |
+| **Accounts** | Every session goes through a login wall. Local email accounts (zero setup), Supabase auth when configured, or guest. Each login owns an isolated workspace that is restored after sign-out. |
+| **Split view** | Chat and Spaces side by side with a draggable divider, so you always see which files the answer is grounded in. |
 | **Spaces** | Isolated knowledge bases. Drag-and-drop `.pdf` `.txt` `.md` `.csv` `.json` upload, parsed and chunked **in the browser**, indexed for retrieval. |
 | **RAG** | Two retrieval modes. **Mode 1** (zero setup) blends BM25 + TF-IDF cosine + synonym expansion. **Mode 2** adds vector similarity via `pgvector` or local cosine over embeddings. |
 | **Providers** | Kilo Code by default, plus Google Gemini, Groq, OpenRouter, or any custom OpenAI-compatible base URL. Model id is a dropdown *and* a free-text field. |
@@ -32,6 +34,26 @@ npm run dev                  # http://localhost:3000
 
 Open the app, click the **Kilo Code** badge in the top-right, paste your API
 key, pick a model, then hit **Test**. That is the entire setup.
+
+### Logon — accounts and restored sessions
+
+The first screen is a login wall:
+
+- **Create account / Sign in** — email + password, stored hashed (PBKDF2)
+  in the browser. Each account keeps its own chats, Spaces, documents and
+  gateway settings; signing out keeps them and the next sign-in restores the
+  workspace exactly where it was (including the last opened chat and Space).
+- **Continue as guest** — one-click, reuses whatever this browser already
+  held (that is the pre-login behaviour).
+- **Supabase auth** — when `NEXT_PUBLIC_SUPABASE_URL` +
+  `NEXT_PUBLIC_SUPABASE_ANON_KEY` are set the same flow goes through
+  `supabase.auth` instead: real authentication with per-user cloud sync, so
+  the workspace follows you across devices (run `supabase/auth-migration.sql`
+  once — see below).
+
+Toggle **Split view** in the top bar or sidebar to pin the Spaces console
+beside the chat: scope selector, file list with chunk previews and
+drag-and-drop uploads stay visible while you work.
 
 ### Spaces — upload, chunk, index
 
@@ -88,9 +110,20 @@ are stored in the browser (`localStorage` / IndexedDB) and applied per request.
    generated `tsvector`), `chats`, the `match_document_chunks*` retrieval
    functions, RLS policies, and the `spaces-files` storage bucket.
 3. Copy the project URL and anon key into `.env.local` and restart.
+4. **Multi-user cloud sync (recommended)**: also run
+   [`supabase/auth-migration.sql`](supabase/auth-migration.sql). It adds
+   `user_id uuid default auth.uid()` to every table, swaps the blanket RLS
+   policies for user-scoped ones, and keeps legacy rows reachable. See the
+   header of that file for enabling the email provider and claiming old rows.
+   Without this step authentication still works; sync just stays shared
+   (legacy anonymous pool).
+5. Enable the Email provider under Dashboard → Authentication →
+   Sign In / Providers.
 
-Without Supabase the same tables are mirrored into IndexedDB, so the retrieval
-behaviour is identical.
+With Supabase auth in place each signed-in user mirrors their own
+chats/spaces/documents and restores them from the cloud on any device.
+Without Supabase (or while using a local account) the same tables are
+mirrored into IndexedDB on that browser only.
 
 ---
 
@@ -104,9 +137,11 @@ app/
   api/models/route.ts        Model catalogue for the searchable dropdown
   icon.svg, layout.tsx, page.tsx, globals.css
 components/
-  Workspace.tsx              App shell, view routing, ⌘K palette
-  Sidebar.tsx                Collapsible 260px rail, recents, profile
-  TopBar.tsx                 LLM badge, private-mode toggle
+  Workspace.tsx              App shell, auth gate, view routing, split view
+  AuthScreen.tsx             Login wall (sign in / register / guest)
+  SpacePanel.tsx             Spaces console for the split view
+  Sidebar.tsx                Collapsible 260px rail, recents, account menu
+  TopBar.tsx                 LLM badge, private-mode toggle, split toggle
   ChatView.tsx               Message stream + prompt orchestration
   FloatingPromptBox.tsx      Luxury prompt composer
   MessageBubble.tsx          Markdown answer + sources drawer
@@ -118,16 +153,20 @@ components/
   prompt/                    Model switcher, space picker, advanced popover
   ui/                        Modal, Dropdown primitives
 context/
+  AuthContext.tsx            Signed-in identity (local accounts / Supabase)
   WorkspaceContext.tsx       Single source of truth for the workspace
 lib/
+  authBackend.ts             Local accounts (PBKDF2) + Supabase auth bridge
   chunking.ts                Structure-aware 800/150 overlap chunker
   rag.ts                     BM25, TF-IDF cosine, vector cosine, RRF merge
   fileParser.ts              Client-side pdf/csv/json/txt/md extraction
-  localDb.ts                 IndexedDB with localStorage fallback
+  localDb.ts                 IndexedDB per account, localStorage fallback
+  uiState.ts                 Per-account "where did I leave off" memory
   supabase.ts                Optional cloud mirror + pgvector search
   chatClient.ts              SSE client: server transport + direct transport
   embeddings.ts, types.ts, constants.ts, utils.ts
 supabase/schema.sql          Ready-to-run Postgres schema
+supabase/auth-migration.sql  Per-user auth: user_id columns + RLS
 scripts/                     verify-rag.ts, mock-gateway.mjs, smoke.mjs
 ```
 
@@ -251,14 +290,10 @@ npm run smoke      # headless Chrome end-to-end run (11 checks)
 npm run e2e        # full journey suite (15 checks)
 ```
 
-`npm run smoke` drives the real UI: it uploads a document, watches it chunk
-and index, saves gateway credentials, sends a message, waits for the streamed
-answer and opens the citation drawer — failing on any console error.
-
-`npm run e2e` goes further: navigation across all views, settings + connection
-test, document filtering, space CRUD (create / rename / delete), RAG chats
-asserted at the request level (with and without context), regenerate, the ⌘K
-palette, reload persistence and cleanup.
+`npm run smoke` and `npm run e2e` drive the real UI. They clear the login
+wall with **Continue as guest** (fresh headless profile) and e2e also
+exercises sign-out → sign-in restore: the chunks, chats and gateway settings
+must survive in IndexedDB with zero environment setup.
 
 ---
 
@@ -295,6 +330,12 @@ gracefully to local storage if the tables are missing.
 
 ## Notes and limits
 
+- **Local accounts are convenience-grade**: the password hash and account list
+  live in this browser only. Use Supabase auth for shared machines or
+  cross-device access — local logins never leave the device and are not
+  recoverable if the browser profile is cleared.
+- **Guests** inherit the legacy single-user workspace of the browser. Prefer
+  named accounts on shared machines.
 - The API key lives in the browser. Treat the deployment as a personal or
   trusted-team instance, or set `KILO_API_KEY` on the server and leave the
   browser key empty.

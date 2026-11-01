@@ -129,11 +129,23 @@ const waitForAnswer = async (question) => {
   );
 };
 
-/** Opens the SpacePicker dropdown and picks an option by visible label. */
+/** Opens the SpacePicker dropdown and picks an option by visible label.
+ *  `.last()` targets the dropdown's option row: when the current scope label
+ *  equals the picked option, the open trigger matches the same name and
+ *  Playwright's strict mode would refuse the ambiguous click. */
 const pickSpace = async (currentLabel, optionName) => {
-  await page.getByText(currentLabel, { exact: true }).click();
-  await page.getByRole("button", { name: optionName }).click();
+  await page.getByText(currentLabel, { exact: true }).first().click();
+  await page.getByRole("button", { name: optionName }).last().click();
 };
+
+/**
+ * Reads the SpacePicker's current label. The working scope is remembered per
+ * login across reloads now, so tests must not assume it starts at "No Space".
+ */
+const currentScopeLabel = async () =>
+  (
+    await page.locator('[data-testid="space-picker-trigger"]').innerText({ timeout: 15000 })
+  ).trim();
 
 const send = async (question) => {
   const before = chatRequests.length;
@@ -151,7 +163,14 @@ console.log(`\nE2E against ${APP_URL} (mock gateway on :4545)\n`);
 
 await step("boot: app loads and hydrates", async () => {
   await page.goto(APP_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
-  await page.waitForSelector("text=Ready when you are, Akapan.", { timeout: 45000 });
+  await page.waitForSelector("text=Sign in to Sloth", { timeout: 45000 });
+});
+
+await step("boot: guest sign-in clears the login wall", async () => {
+  await page.getByRole("button", { name: /Continue as guest/ }).click();
+  await page.waitForSelector("text=Ready when you are, Guest.", {
+    timeout: 45000,
+  });
   await page.waitForSelector("text=Sloth");
 });
 
@@ -362,7 +381,9 @@ await step("search: palette finds the indexed document and opens its Space", asy
 
 await step("persistence: reload keeps settings, chats and indexed chunks", async () => {
   await page.reload({ waitUntil: "domcontentloaded", timeout: 60000 });
-  await page.waitForSelector("text=Ready when you are, Akapan.", { timeout: 45000 });
+  // Per-login memory reopens the last chat after a reload, so the greeting
+  // may not show — wait for the workspace prompt box instead.
+  await page.getByPlaceholder("Ask a question...").waitFor({ timeout: 45000 });
 
   const header = await page.locator("header").first().innerText();
   expect(header.includes("mock-model"), "gateway settings lost after reload");
@@ -370,7 +391,7 @@ await step("persistence: reload keeps settings, chats and indexed chunks", async
 
   // Retrieval still works after reload → chunks survived in IndexedDB.
   await page.getByRole("button", { name: "New chat", exact: true }).first().click();
-  await pickSpace("No Space", /All Spaces/);
+  await pickSpace(await currentScopeLabel(), /All Spaces/);
   const question = "How are stop losses placed?";
   const request = await send(question);
   await waitForAnswer(question);
@@ -424,6 +445,44 @@ await step("chat: an interrupted answer shows a notice instead of spinning", asy
   await page.getByRole("button", { name: /ลองอีกครั้ง/ }).first().waitFor({
     timeout: 10000,
   });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Account sessions: logout → sign-in restores the workspace                   */
+/* -------------------------------------------------------------------------- */
+
+await step("account: sign out returns to the login wall", async () => {
+  // The profile card at the bottom of the sidebar opens the account menu.
+  await page.locator("aside").first().getByText("Guest").click();
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await page.waitForSelector("text=Sign in to Sloth", { timeout: 20000 });
+  // The workspace state is untouched on disk; the shell is just gated.
+});
+
+await step("account: signing back in restores settings, chats and chunks", async () => {
+  await page.getByRole("button", { name: /Continue as guest/ }).click();
+  // Same as above: the remembered chat replaces the greeting after a
+  // successful restore, so wait for the workspace prompt box.
+  await page.getByPlaceholder("Ask a question...").waitFor({ timeout: 45000 });
+
+  // Gateway settings survived the logout.
+  const header = await page.locator("header").first().innerText();
+  expect(header.includes("mock-model"), `gateway settings lost, got: ${header.replace(/\n/g, " | ")}`);
+
+  // The chat session is restored (ui state per login), incl. message bodies.
+  await page.waitForFunction(
+    () => document.body.innerText.includes("maximum position size"),
+    undefined,
+    { timeout: 20000 },
+  );
+
+  // Retrieval still works — chunks were restored with the account.
+  await page.getByRole("button", { name: "New chat", exact: true }).first().click();
+  await pickSpace(await currentScopeLabel(), /All Spaces/);
+  const question = "What signals confirm a breakout?";
+  const request = await send(question);
+  await waitForAnswer(question);
+  expect(request.rag > 0, `chunks lost after re-login (rag=${request.rag})`);
 });
 
 /* -------------------------------------------------------------------------- */

@@ -1,6 +1,6 @@
 "use client";
 
-import { Eye, EyeOff, PanelLeft, ShieldCheck } from "lucide-react";
+import { Columns2, Eye, EyeOff, PanelLeft, ShieldCheck } from "lucide-react";
 
 import { useWorkspace } from "@/context/WorkspaceContext";
 import { getProviderPreset } from "@/lib/constants";
@@ -10,9 +10,17 @@ interface TopBarProps {
   title: string;
   onOpenSettings: () => void;
   onToggleSidebar: () => void;
+  splitActive: boolean;
+  onToggleSplit: () => void;
 }
 
-export function TopBar({ title, onOpenSettings, onToggleSidebar }: TopBarProps) {
+export function TopBar({
+  title,
+  onOpenSettings,
+  onToggleSidebar,
+  splitActive,
+  onToggleSplit,
+}: TopBarProps) {
   const { settings, updateSettings } = useWorkspace();
   const provider = getProviderPreset(settings.providerId);
   const hasKey = settings.apiKey.trim().length > 0;
@@ -34,6 +42,27 @@ export function TopBar({ title, onOpenSettings, onToggleSidebar }: TopBarProps) 
       </div>
 
       <div className="flex shrink-0 items-center gap-2">
+        <button
+          type="button"
+          onClick={onToggleSplit}
+          title={
+            splitActive
+              ? "Turn off the split view (Chat | Spaces)"
+              : "Split the screen: Chat and Spaces side by side"
+          }
+          aria-label="Toggle split view"
+          aria-pressed={splitActive}
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[12px] font-medium transition",
+            splitActive
+              ? "border-purple-200 bg-purple-50 text-purple-700"
+              : "border-slate-200 bg-white text-slate-500 hover:text-slate-800",
+          )}
+        >
+          <Columns2 className="h-3.5 w-3.5" />
+          <span className="hidden sm:inline">Split</span>
+        </button>
+
         <button
           type="button"
           onClick={() => updateSettings({ privateMode: !settings.privateMode })}

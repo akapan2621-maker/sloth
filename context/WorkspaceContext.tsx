@@ -19,24 +19,37 @@ import {
 } from "@/lib/constants";
 import { parseFile } from "@/lib/fileParser";
 import { embedTexts, resetEmbeddingCapability } from "@/lib/embeddings";
-import { localStore, storageBackend } from "@/lib/localDb";
+import {
+  getNamespace,
+  localStore,
+  migrateLegacyToNamespace,
+  setNamespace,
+  storageBackend,
+} from "@/lib/localDb";
 import {
   buildIndex,
   searchLexicalWithIndex,
   searchVectors,
   type BuiltIndex,
 } from "@/lib/rag";
+import { readUiState, writeUiState } from "@/lib/uiState";
 import {
+  deleteChatRemote,
   deleteSpaceRemote,
   deleteDocumentRemote,
+  fetchChats,
+  fetchChunks,
+  fetchDocuments,
   fetchSpaces,
   getSupabase,
   isSupabaseConfigured,
+  upsertChat,
   upsertChunks,
   upsertDocument,
   upsertSpace,
   uploadToBucket,
 } from "@/lib/supabase";
+import { setRemoteSyncUser } from "@/lib/authBackend";
 import type {
   ChatMessage,
   ChatSession,
@@ -49,6 +62,7 @@ import type {
   SpaceSelection,
 } from "@/lib/types";
 import { normaliseBaseUrl, titleFromMessage, uid } from "@/lib/utils";
+import { useAuth } from "./AuthContext";
 
 /* -------------------------------------------------------------------------- */
 /* Defaults                                                                    */
@@ -202,6 +216,30 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [ingestProgress, setIngestProgress] = useState<IngestProgress[]>([]);
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
 
+  /* ------------------------------------------------------------------ */
+  /* Account                                                            */
+  /* ------------------------------------------------------------------ */
+
+  const { status: authStatus, user: authUser } = useAuth();
+
+  /**
+   * Hydration is keyed on the signed-in account: every login owns an isolated
+   * namespace, so switching accounts (or signing back in after a logout)
+   * restores exactly that account's chats, spaces, documents and settings.
+   */
+  const accountKey = authStatus === "ready" && authUser ? authUser.id : null;
+  const isRemoteUser = authUser?.kind === "supabase";
+
+  /**
+   * The account whose data is fully live in state. Kept apart from
+   * `hydrated` because sign-out sets `hydrated` to true (nothing to load)
+   * while in-memory state still belongs to the previous login — a window a
+   * stale persistence write could slip through. The gate closes it: state
+   * may only be persisted for the account that finished hydrating last,
+   * so a re-login can never trash its own restored pointer with leftovers.
+   */
+  const hydratedAccountRef = useRef<string | null>(null);
+
   /**
    * BM25 index cache. Rebuilding it over a large Space (tens of thousands of
    * chunks) on every message blocks the UI, so keep one index per scope until
@@ -217,9 +255,57 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   /* ------------------------------------------------------------------ */
 
   useEffect(() => {
+    if (authStatus !== "ready") return; // wait for the session pointer to resolve
     let cancelled = false;
 
+    if (!accountKey) {
+      // Signed out — the login screen shows instead of the workspace. The
+      // session-pointer gate closes here so nothing writes while the state
+      // still holds the previous account's leftovers.
+      hydratedAccountRef.current = null;
+      setHydrated(true);
+      return;
+    }
+
     (async () => {
+      setHydrated(false);
+
+      // Drop the previous account's in-memory state so nothing bleeds over.
+      setSettings(DEFAULT_SETTINGS);
+      setSpaces([]);
+      setDocuments([]);
+      setChunks([]);
+      setChats([]);
+      setActiveChatId(null);
+      setSpaceSelection({ kind: "none" });
+      setIngestProgress([]);
+      indexCacheRef.current = { chunks: null, byScope: new Map() };
+
+      // Swap the persistence layer to this account's namespace first.
+      // Guests deliberately stay on the legacy (pre-login) scope — that is
+      // what makes "Continue as guest" reuse the browser's original data —
+      // while every other login gets an isolated namespace.
+      const storageKey = accountKey === "guest" ? "" : accountKey;
+      setNamespace(storageKey);
+      // Only a signed-in Supabase identity may mirror data to the cloud.
+      setRemoteSyncUser(isRemoteUser ? accountKey : null);
+
+      // One-time adoption: accounts created after the login system shipped
+      // inherit whatever this browser had before (guest workspace), so
+      // signing in with a name does not look like losing your files.
+      if (storageKey) {
+        try {
+          const adopted = await migrateLegacyToNamespace(storageKey);
+          if (adopted > 0) {
+            console.info(
+              `[workspace] adopted ${adopted} legacy record(s) into account scope`,
+            );
+          }
+        } catch {
+          /* best effort — hydration continues with whatever the namespace has */
+        }
+      }
+
       const [storedSettings, storedSpaces, storedDocuments, storedChunks, storedChats] =
         await Promise.all([
           localStore.settings.get(),
@@ -268,9 +354,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
           void upsertSpace(space);
         }
       }
-      setSpaces(sortByUpdated(spaceList));
-      setDocuments(sortByCreatedDesc(storedDocuments));
-      setChunks(storedChunks);
+
+      let documentList = sortByCreatedDesc(storedDocuments);
+      let chunkList = storedChunks;
 
       // Same rewrite for assistant messages generated before the rename. This
       // runs on every hydration and only persists chats that actually
@@ -305,27 +391,121 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       } catch {
         /* migration is best-effort - never block hydration on it */
       }
+
+      // Remember where this account left off: the open chat and Space scope.
+      const ui = readUiState(accountKey);
+
+      // Cloud restore: a signed-in Supabase identity pulls its rows back
+      // (RLS scopes everything to auth.uid()), which is what makes chats,
+      // Spaces and documents survive a logout on another browser or device.
+      if (isRemoteUser) {
+        try {
+          const [remoteSpaces, remoteDocs, remoteChunks, remoteChats] =
+            await Promise.all([
+              fetchSpaces(),
+              fetchDocuments(),
+              fetchChunks(),
+              fetchChats(),
+            ]);
+
+          if (remoteSpaces && remoteSpaces.length > 0) {
+            const known = new Set(spaceList.map((space) => space.id));
+            for (const space of remoteSpaces) {
+              void localStore.spaces.put(space);
+              if (!known.has(space.id)) spaceList = [...spaceList, space];
+            }
+            spaceList = sortByUpdated(spaceList);
+          }
+
+          if (remoteDocs && remoteDocs.length > 0) {
+            const known = new Set(documentList.map((doc) => doc.id));
+            for (const doc of remoteDocs) {
+              void localStore.documents.put(doc);
+              if (!known.has(doc.id)) documentList = [doc, ...documentList];
+            }
+          }
+
+          if (remoteChunks && remoteChunks.length > 0) {
+            const known = new Set(chunkList.map((chunk) => chunk.id));
+            const missing = remoteChunks.filter(
+              (chunk) => !known.has(chunk.id),
+            );
+            if (missing.length > 0) {
+              await localStore.chunks.putMany(missing);
+              chunkList = [...chunkList, ...missing];
+            }
+          }
+
+          if (remoteChats && remoteChats.length > 0) {
+            const map = new Map(chatList.map((chat) => [chat.id, chat]));
+            for (const remote of remoteChats) {
+              void localStore.chats.put(remote);
+              const localChat = map.get(remote.id);
+              if (!localChat || remote.updatedAt > localChat.updatedAt) {
+                map.set(remote.id, remote);
+              }
+            }
+            chatList = [...map.values()];
+          }
+        } catch (error) {
+          console.warn("[workspace] cloud restore skipped:", error);
+        }
+      }
+
+      if (cancelled) return;
+      setSpaces(sortByUpdated(spaceList));
+      setDocuments(sortByCreatedDesc(documentList));
+      setChunks(chunkList);
       setChats(sortChats(chatList));
+
+      const rememberedSelection = ui.spaceSelection;
+      if (
+        rememberedSelection &&
+        (rememberedSelection.kind !== "space" ||
+          spaceList.some(
+            (space) => space.id === rememberedSelection.spaceId,
+          ))
+      ) {
+        setSpaceSelection(rememberedSelection);
+      }
+
+      // Reopen the chat this login was working in — restoring the pointer
+      // makes a reload or re-login look exactly like it never happened.
+      if (ui.activeChatId && chatList.some((chat) => chat.id === ui.activeChatId)) {
+        setActiveChatId(ui.activeChatId);
+      }
 
       const activeBackend = await storageBackend();
       if (!cancelled) setBackend(activeBackend);
 
-      // Best-effort cloud hydration: merge remote spaces when Supabase is on.
-      if (isSupabaseConfigured) {
-        const remote = await fetchSpaces();
-        if (remote && remote.length > 0 && !cancelled) {
-          setSpaces(sortByUpdated(mergeById(spaceList, remote)));
-          for (const space of remote) void upsertSpace(space);
-        }
+      if (!cancelled) {
+        // Only now is this account's data live in state — open the
+        // persistence gate (the write guard) for exactly this account.
+        hydratedAccountRef.current = accountKey;
+        setHydrated(true);
       }
-
-      if (!cancelled) setHydrated(true);
     })();
 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [authStatus, accountKey, isRemoteUser]);
+
+  /* Persist the working session for this account (chat + scope). ---------- */
+  useEffect(() => {
+    // The gate (hydratedAccountRef) closes during sign-out and between the
+    // sign-in commit and the new account's finished hydration: without it, a
+    // commit that flips accountKey would persist the PREVIOUS login's
+    // in-memory leftovers and overwrite this account's restored pointer.
+    if (
+      !accountKey ||
+      !hydrated ||
+      hydratedAccountRef.current !== accountKey
+    ) {
+      return;
+    }
+    writeUiState(accountKey, { activeChatId, spaceSelection });
+  }, [accountKey, hydrated, activeChatId, spaceSelection]);
 
   /* ------------------------------------------------------------------ */
   /* Settings                                                            */
@@ -347,9 +527,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       };
       void localStore.settings.set(next);
       // The API key is mirrored to localStorage so it survives IndexedDB clears.
+      // It is namespaced like every other per-account record.
       try {
         localStorage.setItem(
-          "aqw:llm-api-key",
+          `aqw:${getNamespace()}llm-api-key`,
           JSON.stringify({ value: next.apiKey, at: Date.now() }),
         );
       } catch {
@@ -625,6 +806,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     };
     setChats((current) => [session, ...current]);
     void localStore.chats.put(session);
+    void upsertChat(session);
     setActiveChatId(session.id);
     return session;
   }, [settings.modelId, spaceSelection]);
@@ -639,6 +821,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         if (chat.id !== id) return chat;
         const next = { ...chat, title, updatedAt: Date.now() };
         void localStore.chats.put(next);
+        void upsertChat(next);
         return next;
       }),
     );
@@ -647,6 +830,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const deleteChat = useCallback((id: string) => {
     setChats((current) => current.filter((chat) => chat.id !== id));
     void localStore.chats.remove(id);
+    void deleteChatRemote(id);
     setActiveChatId((current) => (current === id ? null : current));
   }, []);
 
@@ -657,6 +841,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         ? current.map((chat) => (chat.id === session.id ? session : chat))
         : [session, ...current];
       void localStore.chats.put(session);
+      void upsertChat(session);
       return next;
     });
   }, []);
@@ -677,6 +862,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
             updatedAt: Date.now(),
           };
           void localStore.chats.put(next);
+          void upsertChat(next);
           return next;
         }),
       );
@@ -694,6 +880,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
           );
           const next = { ...chat, messages, updatedAt: Date.now() };
           void localStore.chats.put(next);
+          void upsertChat(next);
           return next;
         }),
       );
@@ -878,13 +1065,6 @@ function sortChats(chats: ChatSession[]): ChatSession[] {
     if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
     return b.updatedAt - a.updatedAt;
   });
-}
-
-function mergeById(local: Space[], remote: Space[]): Space[] {
-  const map = new Map<string, Space>();
-  for (const space of local) map.set(space.id, space);
-  for (const space of remote) map.set(space.id, space);
-  return [...map.values()];
 }
 
 /** Merges lexical + vector hits using reciprocal rank fusion. */

@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import FloatingPromptBox from "@/components/FloatingPromptBox";
 import MessageBubble from "@/components/MessageBubble";
 import RecommendationsGrid from "@/components/RecommendationsGrid";
+import { useAuth } from "@/context/AuthContext";
 import { useWorkspace } from "@/context/WorkspaceContext";
 import {
   DirectTransportUnavailable,
@@ -19,6 +20,18 @@ import { formatBytes, uid } from "@/lib/utils";
 
 /** Abort a response that has produced no bytes for this long. */
 const STREAM_STALL_MS = 60_000;
+
+/** Greeting name comes from the signed-in account, falling back gracefully. */
+function displayGreetingName(
+  user: { name: string; email: string; kind: string } | null,
+): string {
+  if (!user) return "there";
+  const source = user.name || user.email;
+  if (!source) return "there";
+  const first = source.split(/[\s@]/)[0];
+  if (!first) return "there";
+  return first.charAt(0).toUpperCase() + first.slice(1);
+}
 
 function stallMessage(): string {
   return `โมเดลไม่ตอบสนองภายใน ${Math.round(
@@ -73,6 +86,7 @@ export function ChatView() {
     pendingPrompt,
     setPendingPrompt,
   } = useWorkspace();
+  const { user } = useAuth();
 
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -437,7 +451,7 @@ export function ChatView() {
                 </svg>
               </span>
               <h1 className="mt-6 text-3xl font-light tracking-tight text-slate-800">
-                Ready when you are, Akapan.
+                Ready when you are, {displayGreetingName(user)}.
               </h1>
               <p className="mt-2 max-w-md text-[13.5px] leading-6 text-slate-500">
                 Ask anything, or ground your answer in a Space by picking a

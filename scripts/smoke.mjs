@@ -77,17 +77,28 @@ console.log(`Smoke test against ${APP_URL}\n`);
 
 await step("page loads and hydrates", async () => {
   await page.goto(APP_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
-  await page.waitForSelector("text=Ready when you are, Akapan.", { timeout: 45000 });
+  await page.waitForSelector("text=Sign in to Sloth", { timeout: 45000 });
+});
+
+await step("auth: guest sign-in clears the login wall", async () => {
+  await page.getByRole("button", { name: /Continue as guest/ }).click();
+  await page.waitForSelector("text=Ready when you are, Guest.", {
+    timeout: 45000,
+  });
 });
 
 await step("sidebar renders brand, nav and profile", async () => {
   await page.waitForSelector("text=Sloth");
   await page.waitForSelector("text=New chat");
+  await page.waitForSelector("text=Split view");
   await page.waitForSelector("text=Spaces");
   await page.waitForSelector("text=Research");
   await page.waitForSelector("text=Chat agents");
   await page.waitForSelector("text=Apps");
-  await page.waitForSelector("text=akapan2621");
+  const sidebar = await page.locator("aside").first().innerText();
+  if (!sidebar.includes("Guest")) {
+    throw new Error(`profile card did not show the guest account: ${sidebar}`);
+  }
 });
 
 await step("prompt box + quick modes + recommendations render", async () => {

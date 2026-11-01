@@ -1,5 +1,10 @@
 /**
- * Browser persistence layer.
+ * Browser persistence layer, namespaced per account.
+ *
+ * Every login (local account, Supabase user, guest) gets its own isolated
+ * workspace: a dedicated IndexedDB database and prefixed `localStorage` keys.
+ * That is what makes "sign out then sign back in" restore the original
+ * chats/spaces/documents — nothing is shared between accounts.
  *
  * IndexedDB is the primary store (chunks can be large). If IndexedDB is
  * unavailable - private browsing, disabled storage, SSR - the module
@@ -35,59 +40,109 @@ interface KvEntry<T = unknown> {
 
 const LS_PREFIX = "aqw:";
 
-let dbPromise: Promise<IDBDatabase | null> | null = null;
-let idbBroken = false;
+/* -------------------------------------------------------------------------- */
+/* Account namespace                                                          */
+/* -------------------------------------------------------------------------- */
 
-function openDatabase(): Promise<IDBDatabase | null> {
+/**
+ * Active account namespace. "" is the legacy / guest scope: it maps to the
+ * original `amazon-quick-workspace` database and unprefixed `aqw:` keys, so
+ * old data and the e2e scripts keep working.
+ */
+let namespace = "";
+
+const dbPromises = new Map<string, Promise<IDBDatabase | null>>();
+const brokenDbs = new Set<string>();
+
+/** Lowers the active namespace (clears cached db handles). */
+export function setNamespace(ns: string): void {
+  const next = ns || "";
+  if (next === namespace) return;
+  namespace = next;
+}
+
+/** The namespace the store currently reads/writes. */
+export function getNamespace(): string {
+  return namespace;
+}
+
+export function currentDbName(ns: string = namespace): string {
+  return ns ? `${DB_NAME}-${sanitizeNamespace(ns)}` : DB_NAME;
+}
+
+function sanitizeNamespace(ns: string): string {
+  return ns.toLowerCase().replace(/[^a-z0-9_-]+/g, "_").slice(0, 40);
+}
+
+export { DB_NAME, DB_VERSION };
+
+/* -------------------------------------------------------------------------- */
+/* Opening                                                                    */
+/* -------------------------------------------------------------------------- */
+
+function openRawDatabase(name: string): Promise<IDBDatabase | null> {
   if (typeof indexedDB === "undefined") return Promise.resolve(null);
-  if (idbBroken) return Promise.resolve(null);
+  if (brokenDbs.has(name)) return Promise.resolve(null);
 
-  if (!dbPromise) {
-    dbPromise = new Promise<IDBDatabase | null>((resolve) => {
-      let request: IDBOpenDBRequest;
-      try {
-        request = indexedDB.open(DB_NAME, DB_VERSION);
-      } catch {
-        idbBroken = true;
-        resolve(null);
-        return;
+  const existing = dbPromises.get(name);
+  if (existing) return existing;
+
+  const promise = new Promise<IDBDatabase | null>((resolve) => {
+    let request: IDBOpenDBRequest;
+    try {
+      request = indexedDB.open(name, DB_VERSION);
+    } catch {
+      brokenDbs.add(name);
+      dbPromises.set(name, Promise.resolve(null));
+      resolve(null);
+      return;
+    }
+
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(STORES.spaces)) {
+        db.createObjectStore(STORES.spaces, { keyPath: "id" });
       }
+      if (!db.objectStoreNames.contains(STORES.documents)) {
+        const docs = db.createObjectStore(STORES.documents, { keyPath: "id" });
+        docs.createIndex("spaceId", "spaceId", { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORES.chunks)) {
+        const chunks = db.createObjectStore(STORES.chunks, { keyPath: "id" });
+        chunks.createIndex("spaceId", "spaceId", { unique: false });
+        chunks.createIndex("documentId", "documentId", { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORES.chats)) {
+        db.createObjectStore(STORES.chats, { keyPath: "id" });
+      }
+      if (!db.objectStoreNames.contains(STORES.kv)) {
+        db.createObjectStore(STORES.kv, { keyPath: "key" });
+      }
+    };
 
-      request.onupgradeneeded = () => {
-        const db = request.result;
-        if (!db.objectStoreNames.contains(STORES.spaces)) {
-          db.createObjectStore(STORES.spaces, { keyPath: "id" });
-        }
-        if (!db.objectStoreNames.contains(STORES.documents)) {
-          const docs = db.createObjectStore(STORES.documents, { keyPath: "id" });
-          docs.createIndex("spaceId", "spaceId", { unique: false });
-        }
-        if (!db.objectStoreNames.contains(STORES.chunks)) {
-          const chunks = db.createObjectStore(STORES.chunks, { keyPath: "id" });
-          chunks.createIndex("spaceId", "spaceId", { unique: false });
-          chunks.createIndex("documentId", "documentId", { unique: false });
-        }
-        if (!db.objectStoreNames.contains(STORES.chats)) {
-          db.createObjectStore(STORES.chats, { keyPath: "id" });
-        }
-        if (!db.objectStoreNames.contains(STORES.kv)) {
-          db.createObjectStore(STORES.kv, { keyPath: "key" });
-        }
-      };
+    request.onsuccess = () => {
+      dbPromises.set(name, promise);
+      resolve(request.result);
+    };
+    request.onerror = () => {
+      brokenDbs.add(name);
+      dbPromises.set(name, Promise.resolve(null));
+      resolve(null);
+    };
+    request.onblocked = () => {
+      brokenDbs.add(name);
+      dbPromises.set(name, Promise.resolve(null));
+      resolve(null);
+    };
+  });
 
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => {
-        idbBroken = true;
-        resolve(null);
-      };
-      request.onblocked = () => {
-        idbBroken = true;
-        resolve(null);
-      };
-    });
-  }
+  dbPromises.set(name, promise);
+  return promise;
+}
 
-  return dbPromise;
+/** Opens the database for the currently active namespace. */
+function openDatabase(): Promise<IDBDatabase | null> {
+  return openRawDatabase(currentDbName());
 }
 
 function isLocalStorageAvailable(): boolean {
@@ -103,19 +158,24 @@ function isLocalStorageAvailable(): boolean {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Generic operations                                                         */
+/* Generic operations (namespace-scoped)                                      */
 /* -------------------------------------------------------------------------- */
 
+function lsScope(): string {
+  return namespace ? `${namespace}:` : "";
+}
+
 function localKey(store: StoreName, id: string): string {
-  return `${LS_PREFIX}${store}:${id}`;
+  return `${LS_PREFIX}${lsScope()}${store}:${id}`;
 }
 
 function localAll<T>(store: StoreName): T[] {
   if (!isLocalStorageAvailable()) return [];
   const out: T[] = [];
+  const prefix = `${LS_PREFIX}${lsScope()}${store}:`;
   for (let i = 0; i < localStorage.length; i += 1) {
     const key = localStorage.key(i);
-    if (!key || !key.startsWith(`${LS_PREFIX}${store}:`)) continue;
+    if (!key || !key.startsWith(prefix)) continue;
     try {
       const raw = localStorage.getItem(key);
       if (!raw) continue;
@@ -228,9 +288,10 @@ export async function clearStore(store: StoreName): Promise<void> {
   if (result !== null) return;
   if (!isLocalStorageAvailable()) return;
   const keys: string[] = [];
+  const prefix = `${LS_PREFIX}${lsScope()}${store}:`;
   for (let i = 0; i < localStorage.length; i += 1) {
     const key = localStorage.key(i);
-    if (key && key.startsWith(`${LS_PREFIX}${store}:`)) keys.push(key);
+    if (key && key.startsWith(prefix)) keys.push(key);
   }
   for (const key of keys) localStorage.removeItem(key);
 }
@@ -249,7 +310,7 @@ export async function setKv<T>(key: string, value: T): Promise<void> {
   if (result !== null) return;
   if (isLocalStorageAvailable()) {
     try {
-      localStorage.setItem(`${LS_PREFIX}kv:${key}`, JSON.stringify(value));
+      localStorage.setItem(`${LS_PREFIX}${lsScope()}kv:${key}`, JSON.stringify(value));
     } catch {
       /* ignore */
     }
@@ -265,7 +326,7 @@ export async function getKv<T>(key: string): Promise<T | null> {
   if (result) return result.value ?? null;
   if (!isLocalStorageAvailable()) return null;
   try {
-    const raw = localStorage.getItem(`${LS_PREFIX}kv:${key}`);
+    const raw = localStorage.getItem(`${LS_PREFIX}${lsScope()}kv:${key}`);
     return raw ? (JSON.parse(raw) as T) : null;
   } catch {
     return null;
@@ -315,22 +376,175 @@ export async function storageBackend(): Promise<"indexeddb" | "localstorage" | "
   return "memory";
 }
 
-/** Approximate on-disk footprint of the local workspace. */
+/** Approximate on-disk footprint of the local workspace (active namespace). */
 export async function localUsageBytes(): Promise<number> {
-  if (typeof navigator !== "undefined" && navigator.storage?.estimate) {
-    try {
-      const { usage } = await navigator.storage.estimate();
-      return usage ?? 0;
-    } catch {
-      /* ignore */
-    }
-  }
+  const scope = lsScope();
   if (!isLocalStorageAvailable()) return 0;
   let total = 0;
   for (let i = 0; i < localStorage.length; i += 1) {
     const key = localStorage.key(i);
-    if (!key || !key.startsWith(LS_PREFIX)) continue;
+    if (!key || !key.startsWith(`${LS_PREFIX}${scope}`)) continue;
     total += (localStorage.getItem(key) ?? "").length * 2;
   }
+  return total;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Legacy adoption                                                            */
+/* -------------------------------------------------------------------------- */
+
+const LEGACY_ADOPTED_KEY = "legacy-adopted";
+
+function readAllRaw<T>(db: IDBDatabase, store: StoreName): Promise<T[]> {
+  return new Promise<T[]>((resolve) => {
+    try {
+      const request = db.transaction(store, "readonly").objectStore(store).getAll();
+      request.onsuccess = () => resolve(request.result as T[]);
+      request.onerror = () => resolve([]);
+    } catch {
+      resolve([]);
+    }
+  });
+}
+
+function putManyRaw(
+  db: IDBDatabase,
+  store: StoreName,
+  values: unknown[],
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (values.length === 0) {
+      resolve();
+      return;
+    }
+    try {
+      const transaction = db.transaction(store, "readwrite");
+      const objectStore = transaction.objectStore(store);
+      for (const value of values) objectStore.put(value);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => resolve();
+      transaction.onabort = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
+function collectLegacyLocalStorage(): { spaces: Space[]; documents: DocumentMeta[]; chunks: DocumentChunk[]; chats: ChatSession[]; kv: KvEntry[] } {
+  const pick = <T,>(store: StoreName): T[] => {
+    if (!isLocalStorageAvailable()) return [];
+    const out: T[] = [];
+    const prefix = `${LS_PREFIX}${store}:`;
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (!key || !key.startsWith(prefix)) continue;
+      try {
+        const raw = localStorage.getItem(key);
+        if (raw) out.push(JSON.parse(raw) as T);
+      } catch {
+        /* skip */
+      }
+    }
+    return out;
+  };
+
+  // kv fallback records store the bare value, not a {key, value} entry —
+  // rebuild the entry from the localStorage key itself.
+  const kv: KvEntry[] = [];
+  if (isLocalStorageAvailable()) {
+    const prefix = `${LS_PREFIX}kv:`;
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const storedKey = localStorage.key(i);
+      if (!storedKey || !storedKey.startsWith(prefix)) continue;
+      try {
+        const raw = localStorage.getItem(storedKey);
+        if (!raw) continue;
+        kv.push({ key: storedKey.slice(prefix.length), value: JSON.parse(raw) });
+      } catch {
+        /* skip */
+      }
+    }
+  }
+
+  return {
+    spaces: pick<Space>("spaces"),
+    documents: pick<DocumentMeta>("documents"),
+    chunks: pick<DocumentChunk>("chunks"),
+    chats: pick<ChatSession>("chats"),
+    kv,
+  };
+}
+
+/**
+ * Copies anything living in the pre-login workspace (the default namespace
+ * database + its `localStorage` fallback records) into the freshly created
+ * account namespace, once. New accounts therefore "inherit" the data that the
+ * browser already holds, and existing users lose nothing when the login
+ * system ships.
+ *
+ * Returns the number of records adopted. Never copies when the target
+ * namespace already holds records.
+ */
+export async function migrateLegacyToNamespace(ns: string): Promise<number> {
+  if (!ns || ns === "guest") return 0;
+
+  const targetDb = await openRawDatabase(currentDbName(ns));
+  if (!targetDb) return 0;
+
+  const targetSpaces = await readAllRaw<Space>(targetDb, STORES.spaces);
+  const targetChats = await readAllRaw<ChatSession>(targetDb, STORES.chats);
+  if (targetSpaces.length > 0 || targetChats.length > 0) return 0;
+
+  const legacyDb = await openRawDatabase(DB_NAME);
+  let adapted = collectLegacyLocalStorage();
+
+  if (legacyDb) {
+    const [spaces, documents, chunks, chats, kvEntries] = await Promise.all([
+      readAllRaw<Space>(legacyDb, STORES.spaces),
+      readAllRaw<DocumentMeta>(legacyDb, STORES.documents),
+      readAllRaw<DocumentChunk>(legacyDb, STORES.chunks),
+      readAllRaw<ChatSession>(legacyDb, STORES.chats),
+      readAllRaw<KvEntry>(legacyDb, STORES.kv),
+    ]);
+    if (kvEntries.length > 0) {
+      // Prefer IndexedDB kv entries; merge by key with LS fallback first.
+      const map = new Map<string, KvEntry>();
+      for (const entry of adapted.kv) map.set(String(entry.key), entry);
+      for (const entry of kvEntries) map.set(String(entry.key), entry);
+      adapted = { ...adapted, kv: [...map.values()] };
+    }
+    adapted = {
+      spaces,
+      documents,
+      chunks,
+      chats,
+      kv: adapted.kv,
+    };
+  }
+
+  const total =
+    adapted.spaces.length +
+    adapted.documents.length +
+    adapted.chunks.length +
+    adapted.chats.length;
+
+  if (total === 0) {
+    void putManyRaw(targetDb, STORES.kv, [
+      { key: LEGACY_ADOPTED_KEY, value: "adopted-empty" } satisfies KvEntry,
+    ]);
+    return 0;
+  }
+
+  await putManyRaw(targetDb, STORES.spaces, adapted.spaces);
+  await putManyRaw(targetDb, STORES.documents, adapted.documents);
+  await putManyRaw(targetDb, STORES.chunks, adapted.chunks);
+  await putManyRaw(targetDb, STORES.chats, adapted.chats);
+
+  const settings = adapted.kv.filter((entry) => entry.key === "llm-settings");
+  if (settings.length > 0) await putManyRaw(targetDb, STORES.kv, settings);
+  await putManyRaw(targetDb, STORES.kv, [
+    { key: LEGACY_ADOPTED_KEY, value: "done" } satisfies KvEntry,
+  ]);
+
   return total;
 }

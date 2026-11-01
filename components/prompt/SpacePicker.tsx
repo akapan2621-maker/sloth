@@ -31,7 +31,10 @@ export function SpacePicker({ value, onChange, onUpload }: SpacePickerProps) {
     <Dropdown
       width="w-72"
       trigger={
-        <div className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900">
+        <div
+          data-testid="space-picker-trigger"
+          className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
+        >
           {value.kind === "none" ? (
             <Database className="h-3.5 w-3.5 text-slate-400" />
           ) : value.kind === "all" ? (
