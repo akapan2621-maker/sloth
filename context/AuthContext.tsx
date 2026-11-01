@@ -13,6 +13,7 @@ import {
 import {
   authMode,
   continueAsGuest,
+  ensureSeededAccount,
   listLocalAccounts,
   localSignIn,
   localSignUp,
@@ -49,6 +50,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     mountedRef.current = true;
     (async () => {
+      await ensureSeededAccount();
       const restored = await restoreSession();
       if (!mountedRef.current) return;
       setUser(restored);

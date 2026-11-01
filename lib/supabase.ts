@@ -2,9 +2,12 @@
  * Optional Supabase integration.
  *
  * The app is fully functional without Supabase. When the public URL + anon
- * key are present we mirror Spaces / Documents / Chunks to Postgres and use
- * `pgvector` for vector retrieval (Mode 2). Everything degrades gracefully
- * when the project is not configured or the network is unavailable.
+ * key are present we mirror Spaces / Documents / Chunks / Chats to Postgres
+ * and use `pgvector` for vector retrieval (Mode 2). Everything degrades
+ * gracefully when the project is not configured or the network is unavailable.
+ *
+ * Note: the original uploaded files no longer live here — archival uploads go
+ * to Vercel Blob through `/api/upload` (see `lib/blobStorage.ts`).
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
@@ -328,36 +331,4 @@ export async function fetchChats(): Promise<ChatSession[] | null> {
     modelId: row.model_id ?? "",
     pinned: Boolean(row.pinned),
   }));
-}
-
-/* -------------------------------------------------------------------------- */
-/* Storage bucket                                                             */
-/* -------------------------------------------------------------------------- */
-
-/** Uploads the original file to the `spaces-files` bucket when configured. */
-export async function uploadToBucket(
-  spaceId: string,
-  file: File,
-): Promise<string | null> {
-  const supabase = getSupabase();
-  if (!supabase) return null;
-
-  // Signed-in identities get their own folder prefix in the bucket.
-  let userPrefix = "";
-  try {
-    const { data } = await supabase.auth.getUser();
-    if (data?.user?.id) userPrefix = `${data.user.id}/`;
-  } catch {
-    /* anon session — legacy layout */
-  }
-
-  const path = `${userPrefix}${spaceId}/${Date.now()}-${file.name.replace(/[^\w.\-]+/g, "_")}`;
-  const { error } = await supabase.storage
-    .from("spaces-files")
-    .upload(path, file, { upsert: true });
-  if (error) {
-    console.warn("[supabase] bucket upload failed:", error.message);
-    return null;
-  }
-  return path;
 }

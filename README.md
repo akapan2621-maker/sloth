@@ -19,7 +19,7 @@ Built for the **Vercel Hobby** and **Supabase free tiers**, powered by the
 | **Spaces** | Isolated knowledge bases. Drag-and-drop `.pdf` `.txt` `.md` `.csv` `.json` upload, parsed and chunked **in the browser**, indexed for retrieval. |
 | **RAG** | Two retrieval modes. **Mode 1** (zero setup) blends BM25 + TF-IDF cosine + synonym expansion. **Mode 2** adds vector similarity via `pgvector` or local cosine over embeddings. |
 | **Providers** | Kilo Code by default, plus Google Gemini, Groq, OpenRouter, or any custom OpenAI-compatible base URL. Model id is a dropdown *and* a free-text field. |
-| **Storage** | Works with zero setup using IndexedDB (falling back to `localStorage`). Add Supabase for cloud sync, `pgvector` and the `spaces-files` bucket. |
+| **Storage** | Works with zero setup using IndexedDB (falling back to `localStorage`). Uploaded originals archive to **Vercel Blob** via `/api/upload`; add Supabase for cloud sync and `pgvector`. |
 | **Privacy** | *Private mode* streams straight from the gateway so your API key never reaches the app server (with automatic fallback when CORS blocks it). |
 
 ---
@@ -45,6 +45,11 @@ The first screen is a login wall:
   workspace exactly where it was (including the last opened chat and Space).
 - **Continue as guest** — one-click, reuses whatever this browser already
   held (that is the pre-login behaviour).
+- **Seeded admin** — a fresh browser always has `admin` / `admin12345`
+  available so nobody is locked out. It is a convenience login, not an
+  access-control boundary: the credential ships in the client and every
+  account has the same permissions. Change it (or delete the row from
+  `aqw:auth:accounts`) before sharing the deployment.
 - **Supabase auth** — when `NEXT_PUBLIC_SUPABASE_URL` +
   `NEXT_PUBLIC_SUPABASE_ANON_KEY` are set the same flow goes through
   `supabase.auth` instead: real authentication with per-user cloud sync, so
@@ -108,7 +113,8 @@ are stored in the browser (`localStorage` / IndexedDB) and applied per request.
 2. Open **SQL Editor** and run [`supabase/schema.sql`](supabase/schema.sql).
    It creates `spaces`, `documents`, `document_chunks` (with `pgvector` and a
    generated `tsvector`), `chats`, the `match_document_chunks*` retrieval
-   functions, RLS policies, and the `spaces-files` storage bucket.
+   functions and RLS policies. (The `spaces-files` bucket it creates is no
+   longer used — original files go to Vercel Blob, see below.)
 3. Copy the project URL and anon key into `.env.local` and restart.
 4. **Multi-user cloud sync (recommended)**: also run
    [`supabase/auth-migration.sql`](supabase/auth-migration.sql). It adds
@@ -127,6 +133,27 @@ mirrored into IndexedDB on that browser only.
 
 ---
 
+## Vercel Blob file storage
+
+Every uploaded original is archived to **Vercel Blob** next to the app — no
+third-party bucket needed. Connecting a store injects
+`BLOB_READ_WRITE_TOKEN`, which `app/api/upload/route.ts` uses server-side so
+the token never reaches the browser.
+
+```bash
+vercel blob create-store sloth-storage   # answer Y to "link to this project?"
+vercel env pull .env.local               # local development
+```
+
+The client posts the file to `POST /api/upload` (multipart, `file` +
+`spaceId`); the route sanitises the pathname, caps files at 25 MB and
+answers `503` when no store is connected — in that case the archival copy is
+skipped and everything else keeps working. The RAG corpus itself (text,
+chunks, embeddings) is unaffected: it lives in IndexedDB and only mirrors to
+Postgres when Supabase is configured.
+
+---
+
 ## Architecture
 
 ```
@@ -135,6 +162,7 @@ app/
   api/embeddings/route.ts    Optional vector embeddings
   api/test-connection/route.ts  Gateway reachability + model list
   api/models/route.ts        Model catalogue for the searchable dropdown
+  api/upload/route.ts        Vercel Blob archival upload (server-held token)
   icon.svg, layout.tsx, page.tsx, globals.css
 components/
   Workspace.tsx              App shell, auth gate, view routing, split view
@@ -163,11 +191,13 @@ lib/
   localDb.ts                 IndexedDB per account, localStorage fallback
   uiState.ts                 Per-account "where did I leave off" memory
   supabase.ts                Optional cloud mirror + pgvector search
+  blobStorage.ts             Client for the Vercel Blob upload endpoint
   chatClient.ts              SSE client: server transport + direct transport
   embeddings.ts, types.ts, constants.ts, utils.ts
 supabase/schema.sql          Ready-to-run Postgres schema
 supabase/auth-migration.sql  Per-user auth: user_id columns + RLS
-scripts/                     verify-rag.ts, mock-gateway.mjs, smoke.mjs
+scripts/                     verify-rag.ts, mock-gateway.mjs, smoke.mjs,
+                             e2e.mjs (full), e2e-session.mjs (login/split)
 ```
 
 ### Why the browser parses documents

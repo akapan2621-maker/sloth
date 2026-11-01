@@ -256,6 +256,54 @@ export async function localSignIn(
 }
 
 /* -------------------------------------------------------------------------- */
+/* Seeded admin account                                                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A ready-made sign-in that ships with the app so nobody is locked out of a
+ * fresh browser profile. Seeding is idempotent and only ever runs in local
+ * mode — Supabase-backed projects authenticate elsewhere.
+ *
+ * SECURITY: this credential is baked into the client and is therefore public
+ * knowledge. It is a convenience login, not an access-control boundary: every
+ * account has the same permissions, and the seeded hash sits in localStorage
+ * where anyone with devtools can read it. Change the password after first
+ * sign-in (or delete the row from `aqw:auth:accounts`) on anything shared.
+ */
+const SEEDED_ADMIN = {
+  email: "admin",
+  password: "admin12345",
+  name: "Admin",
+} as const;
+
+/** Creates the admin account on first run; no-op once it exists. */
+export async function ensureSeededAccount(): Promise<void> {
+  if (authMode !== "local") return;
+
+  const accounts = readAccounts();
+  if (accounts.some((account) => account.email === SEEDED_ADMIN.email)) return;
+
+  const salt = randomSalt();
+  const hash = await derivePasswordHash(
+    SEEDED_ADMIN.password,
+    salt,
+    PBKDF2_ITERATIONS,
+  );
+
+  const account: StoredAccount = {
+    id: `u_${randomHex(9)}`,
+    email: SEEDED_ADMIN.email,
+    name: SEEDED_ADMIN.name,
+    salt: toBase64Url(salt),
+    iterations: PBKDF2_ITERATIONS,
+    hash,
+    createdAt: Date.now(),
+  };
+
+  writeAccounts([...accounts, account]);
+}
+
+/* -------------------------------------------------------------------------- */
 /* Supabase auth                                                              */
 /* -------------------------------------------------------------------------- */
 

@@ -47,8 +47,8 @@ import {
   upsertChunks,
   upsertDocument,
   upsertSpace,
-  uploadToBucket,
 } from "@/lib/supabase";
+import { uploadFileToBlob } from "@/lib/blobStorage";
 import { setRemoteSyncUser } from "@/lib/authBackend";
 import type {
   ChatMessage,
@@ -755,7 +755,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
           await localStore.chunks.putMany(documentChunks);
           void upsertDocument(meta, parsed.text);
           void upsertChunks(documentChunks);
-          void uploadToBucket(spaceId, file);
+          void uploadFileToBlob(spaceId, file);
 
           setDocuments((current) => [meta, ...current]);
           setChunks((current) => [...current, ...documentChunks]);
