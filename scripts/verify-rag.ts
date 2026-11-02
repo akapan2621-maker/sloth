@@ -90,6 +90,101 @@ check(
 );
 
 /* -------------------------------------------------------------------------- */
+/*
+ * Regression: the overlap-tail stall that crashed the tab on upload.
+ *
+ * A paragraph that nearly fills the window leaves no room for the full
+ * 150 character overlap seed (150 + 714 + 2 > 800). The packer used to
+ * reject its very first candidate in that situation, leave `cursor` sitting
+ * on `blockIndex`, and let the outer loop repack the same block forever,
+ * pushing a chunk on every pass until the browser ran out of memory
+ * ("Aw, Snap!" when uploading a ~46 KB EA39 signal-file).
+ *
+ * The input below is the synthetic equivalent: paragraphs long enough to
+ * stall the old code, short enough to stay on the packing path.
+ */
+console.log("\nChunking regression (overlap-tail stall)");
+const stallParagraphs = Array.from(
+  { length: 12 },
+  (_, i) =>
+    `Paragraph ${i} ` +
+    "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima. "
+      .repeat(10)
+      .trim(),
+);
+const stallText = stallParagraphs.join("\n\n");
+const stallChunks = chunkText(stallText);
+
+check(
+  "terminates with one chunk per paragraph instead of repacking forever",
+  stallChunks.length === stallParagraphs.length,
+  `got ${stallChunks.length} chunks for ${stallParagraphs.length} paragraphs`,
+);
+check(
+  "stalled-input chunks stay within the 800 character window",
+  stallChunks.every((chunk) => chunk.content.length <= 800),
+  `max ${Math.max(...stallChunks.map((c) => c.content.length))}`,
+);
+check(
+  "every stalled paragraph survives into a chunk whole",
+  stallParagraphs.every((paragraph) =>
+    stallChunks.some((chunk) => chunk.content.includes(paragraph)),
+  ),
+);
+check(
+  "stalled-input chunks keep a positive, bounded overlap",
+  stallChunks
+    .slice(1)
+    .every((chunk, index) => {
+      const overlap = stallChunks[index].end - chunk.start;
+      return overlap > 0 && overlap <= 220;
+    }),
+  stallChunks
+    .slice(1)
+    .map((chunk, index) => stallChunks[index].end - chunk.start)
+    .join(", "),
+);
+check(
+  "stalled-input offsets stay inside the source document",
+  stallChunks.every(
+    (chunk) =>
+      chunk.start >= 0 && chunk.end <= stallText.length && chunk.start < chunk.end,
+  ),
+);
+
+/* A paragraph past the window goes through hardSplit: its slices must carry
+ * their own offsets, otherwise every slice reports the block's start and the
+ * persisted start/end offsets drift thousands of characters from the truth. */
+const giantParagraph = Array.from(
+  { length: 40 },
+  (_, i) => `line ${i} of the very long paragraph with some words in it`,
+).join("\n");
+const giantText = ["Short intro paragraph.", giantParagraph, "Short outro paragraph."].join(
+  "\n\n",
+);
+const giantChunks = chunkText(giantText);
+
+check(
+  "an oversized paragraph is split, not dropped",
+  giantChunks.some((chunk) => chunk.content.includes("line 0 ")) &&
+    giantChunks.some((chunk) => chunk.content.includes("line 39 ")),
+  `${giantChunks.length} chunks`,
+);
+check(
+  "hard-split slices point at their real position in the source",
+  giantChunks.every((chunk) => giantText.slice(chunk.start, chunk.end) === chunk.content),
+  giantChunks
+    .filter((chunk) => giantText.slice(chunk.start, chunk.end) !== chunk.content)
+    .map((c) => `${c.start}-${c.end}`)
+    .join(", "),
+);
+check(
+  "hard-split chunks stay within the 800 character window",
+  giantChunks.every((chunk) => chunk.content.length <= 800),
+  `max ${Math.max(...giantChunks.map((c) => c.content.length))}`,
+);
+
+/* -------------------------------------------------------------------------- */
 
 console.log("\nCSV parsing");
 const rows = parseCsvRows(

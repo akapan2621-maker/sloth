@@ -69,17 +69,14 @@ export function chunkText(
         prefix = "";
       }
       const slices = hardSplit(block.text, maxSize, overlap);
-      slices.forEach((slice, sliceIndex) => {
+      for (const slice of slices) {
         chunks.push({
           index: chunks.length,
-          content: slice,
-          start: block.start,
-          end: block.start + slice.length,
+          content: slice.text,
+          start: block.start + slice.start,
+          end: block.start + slice.end,
         });
-        if (sliceIndex === slices.length - 1) {
-          // nothing further to seed
-        }
-      });
+      }
       blockIndex += 1;
       continue;
     }
@@ -96,7 +93,12 @@ export function chunkText(
       if (candidate.text.length > maxSize) break;
 
       const addition = first ? candidate.text.length : candidate.text.length + 2;
-      if (length + addition > maxSize && !first) break;
+      // Only stop packing once at least one block has been taken. With a
+      // seeded overlap tail the very first candidate can already blow the
+      // window (150 + 717 > 800); breaking there left `cursor` sitting on
+      // `blockIndex`, so the outer loop repacked the same block forever and
+      // pushed a chunk on every pass until the tab ran out of memory.
+      if (length + addition > maxSize && cursor > blockIndex) break;
 
       content += first ? candidate.text : `\n\n${candidate.text}`;
       length += addition;
@@ -107,14 +109,49 @@ export function chunkText(
       if (length >= maxSize) break;
     }
 
+    // Defence in depth: the inner loop always consumes at least one block,
+    // so `cursor` should have moved. If a future change ever breaks that
+    // contract, recover instead of repacking this block on every pass (an
+    // endless repack pushes a chunk per turn until the tab runs out of memory).
+    if (cursor === blockIndex) {
+      if (prefix) {
+        // The block did not fit behind the overlap tail and nothing was
+        // taken: drop the tail and pack the block from a clean window.
+        // The tail is a copy of the previous chunk's end, so dropping it
+        // loses no content, and the next pass has `prefix === ""`.
+        prefix = "";
+        prefixStart = 0;
+        continue;
+      }
+      // Unreachable in practice: with an empty window the first candidate is
+      // this very block and always fits. Emit it alone so both progress and
+      // content survive whatever change made this branch reachable.
+      chunks.push({
+        index: chunks.length,
+        content: block.text,
+        start: block.start,
+        end: block.end,
+      });
+      blockIndex += 1;
+      continue;
+    }
+
     chunks.push({ index: chunks.length, content, start, end });
 
     if (cursor >= blocks.length) break;
 
-    // Seed the next chunk with the tail of this one.
-    const tail = tailOf(content, overlap);
-    prefix = tail;
-    prefixStart = Math.max(0, end - tail.length);
+    // Seed the next chunk with the tail of this one, trimmed to what still
+    // fits in front of the block that follows. A full overlap tail ahead of
+    // a long paragraph (150 + 717 > 800) pushed the packer's first candidate
+    // over the window, so it took nothing, `cursor` never moved and the
+    // outer loop repacked the same block forever until the tab ran out of
+    // memory ("Aw, Snap!" on the EA39 upload). A non-positive `room` means
+    // the next block fills the window by itself (or is heading for
+    // `hardSplit`), so nothing is seeded there.
+    const room = maxSize - (blocks[cursor].text.length + 2);
+    const seedSize = Math.min(overlap, room);
+    prefix = seedSize >= 1 ? tailOf(content, seedSize) : "";
+    prefixStart = Math.max(0, end - prefix.length);
     blockIndex = cursor;
   }
 
@@ -191,8 +228,19 @@ export function tailOf(text: string, size: number): string {
   return window;
 }
 
-/** Sliding-window split used for blocks that exceed the chunk size. */function hardSplit(text: string, maxSize: number, overlap: number): string[] {
-  const out: string[] = [];
+/**
+ * Sliding-window split used for blocks that exceed the chunk size.
+ *
+ * Each slice carries its own offsets inside `text` (not the block's start),
+ * otherwise every slice reports the same `end` and the persisted
+ * start/end offsets drift away from the real position in the document.
+ */
+function hardSplit(
+  text: string,
+  maxSize: number,
+  overlap: number,
+): Array<{ text: string; start: number; end: number }> {
+  const out: Array<{ text: string; start: number; end: number }> = [];
   const step = Math.max(1, maxSize - overlap);
   let pos = 0;
 
@@ -207,8 +255,16 @@ export function tailOf(text: string, size: number): string {
       );
       if (breakAt > maxSize * 0.5) end = pos + breakAt + 1;
     }
-    const slice = text.slice(pos, end).trim();
-    if (slice) out.push(slice);
+    const raw = text.slice(pos, end);
+    const slice = raw.trim();
+    if (slice) {
+      const lead = raw.length - raw.trimStart().length;
+      out.push({
+        text: slice,
+        start: pos + lead,
+        end: pos + lead + slice.length,
+      });
+    }
     if (end >= text.length) break;
     pos = Math.max(pos + 1, end - overlap);
     if (pos <= 0) pos = step;
