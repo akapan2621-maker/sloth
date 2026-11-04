@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 
+import { StorageBanner, StorageStatusChip } from "@/components/StorageBanner";
 import { useAuth } from "@/context/AuthContext";
 import { cn } from "@/lib/utils";
 
@@ -74,6 +75,7 @@ export function AuthScreen() {
         transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
         className="relative w-full max-w-md"
       >
+        <StorageBanner />
         <div className="rounded-3xl border border-slate-200 bg-white/90 p-8 shadow-lift backdrop-blur-md">
           {/* Brand */}
           <div className="flex items-center gap-3">
@@ -95,7 +97,11 @@ export function AuthScreen() {
               <Cloud className="h-3.5 w-3.5" />
               Supabase auth — sign in from any device, data synced per user
             </div>
-          ) : null}
+          ) : (
+            <div className="mt-4">
+              <StorageStatusChip />
+            </div>
+          )}
 
           {/* Tabs */}
           <div className="mt-5 grid grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1">

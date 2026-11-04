@@ -24,6 +24,7 @@ import {
   type WorkspaceUser,
 } from "@/lib/authBackend";
 import { getSupabase } from "@/lib/supabase";
+import { requestPersistentStorage } from "@/lib/storageHealth";
 
 interface AuthContextValue {
   /** "restoring" until the session pointer has been resolved on first paint. */
@@ -49,6 +50,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     mountedRef.current = true;
+    // Ask for durable storage early — without it the browser may evict site
+    // data under pressure (and some setups clear it on close entirely).
+    void requestPersistentStorage();
     (async () => {
       await ensureSeededAccount();
       const restored = await restoreSession();

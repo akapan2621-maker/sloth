@@ -22,6 +22,7 @@ import { useWorkspace } from "@/context/WorkspaceContext";
 import { ACCEPTED_FILE_EXTENSIONS } from "@/lib/constants";
 import { isSupportedFile } from "@/lib/fileParser";
 import { localUsageBytes } from "@/lib/localDb";
+import { StorageStatusChip } from "@/components/StorageBanner";
 import type { IngestProgress, Space } from "@/lib/types";
 import { cn, formatBytes, formatRelativeTime } from "@/lib/utils";
 
@@ -169,6 +170,7 @@ export function SpacesManager({ onClose }: SpacesManagerProps) {
               {formatBytes(usageBytes)} stored locally
             </span>
           ) : null}
+          <StorageStatusChip />
           {onClose ? (
             <button
               type="button"

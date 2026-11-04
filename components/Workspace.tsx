@@ -15,6 +15,7 @@ import Sidebar, { type SidebarView } from "@/components/Sidebar";
 import SpacePanel from "@/components/SpacePanel";
 import SpacesManager from "@/components/SpacesManager";
 import TopBar from "@/components/TopBar";
+import { StorageBanner } from "@/components/StorageBanner";
 import { useAuth } from "@/context/AuthContext";
 import { useWorkspace } from "@/context/WorkspaceContext";
 import { readUiState, writeUiState } from "@/lib/uiState";
@@ -154,6 +155,8 @@ export function Workspace() {
           splitActive={splitOn}
           onToggleSplit={toggleSplit}
         />
+
+        <StorageBanner />
 
         <main
           ref={shellRef}

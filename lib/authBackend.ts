@@ -53,7 +53,7 @@ interface SessionPointer {
   at: number;
 }
 
-const SESSION_KEY = "aqw:auth:session";
+export const SESSION_KEY = "aqw:auth:session";
 const ACCOUNTS_KEY = "aqw:auth:accounts";
 
 function safeGet(storage: "local" | "session", key: string): string | null {
