@@ -77,6 +77,7 @@ export function ChatView() {
     newChat,
     appendMessage,
     updateMessage,
+    truncateAfterMessage,
     spaceSelection,
     setSpaceSelection,
     retrieve,
@@ -132,7 +133,7 @@ export function ChatView() {
   const submit = useCallback(
     async (
       rawText?: string,
-      retryOf?: { userId: string; assistantId: string },
+      retryOf?: { userId: string; assistantId: string | null },
     ) => {
       const text = (rawText ?? input).trim();
       if (!text || streaming) return;
@@ -147,7 +148,9 @@ export function ChatView() {
       }
 
       // A retry replaces an interrupted assistant turn in place: it reuses the
-      // previous user question instead of appending a duplicate bubble.
+      // previous user question instead of appending a duplicate bubble. An
+      // edited question reuses the same turn (history up to it), then answers
+      // with a brand-new assistant bubble.
       const retryIds = retryOf ?? null;
       const retryWorks =
         retryIds !== null &&
@@ -166,7 +169,8 @@ export function ChatView() {
               message.role === "assistant"
                 ? ("assistant" as const)
                 : ("user" as const),
-            content: message.content,
+            // Edits feed the new wording; plain retries pass the old one.
+            content: message.id === retryIds.userId ? text : message.content,
           }));
       } else {
         const userMessage: ChatMessage = {
@@ -199,7 +203,7 @@ export function ChatView() {
       });
 
       let assistantId: string;
-      if (retryWorks && retryIds) {
+      if (retryWorks && retryIds?.assistantId) {
         // Reset the existing (interrupted) assistant bubble in place.
         assistantId = retryIds.assistantId;
         updateMessage(chatId, assistantId, {
@@ -414,9 +418,27 @@ export function ChatView() {
     setStreamingText("");
   }, []);
 
-  const copyAnswer = useCallback((text: string) => {
-    void navigator.clipboard?.writeText(text);
-  }, []);
+  /**
+   * Message edit. `resend` = ChatGPT-style: keep the thread up to the edited
+   * question (dropping the later turns), update the wording, answer again —
+   * reusing the assistant bubble that followed when there is one. Plain save
+   * just rewrites the text in place.
+   */
+  const handleEditMessage = useCallback(
+    (messageId: string, newText: string, resend: boolean) => {
+      const chatId = chatIdRef.current;
+      if (!chatId) return;
+      updateMessage(chatId, messageId, { content: newText });
+      if (!resend) return;
+
+      // The truncation drops the follower bubble, so the answer must be
+      // appended as a new bubble rather than reset in place.
+      truncateAfterMessage(chatId, messageId);
+      void submit(newText, { userId: messageId, assistantId: null });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [truncateAfterMessage, updateMessage],
+  );
 
   /**
    * While a response streams, the assistant placeholder that already lives in
@@ -466,7 +488,11 @@ export function ChatView() {
                 key={message.id}
                 message={message}
                 streaming={streaming && index === renderMessages.length - 1}
-                onCopy={copyAnswer}
+                onEdit={
+                  message.role === "user" && !streaming
+                    ? handleEditMessage
+                    : undefined
+                }
                 onRetry={
                   message.role === "assistant" &&
                   !message.content &&

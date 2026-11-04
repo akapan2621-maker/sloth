@@ -175,6 +175,11 @@ export interface WorkspaceContextValue {
   saveChat: (session: ChatSession) => void;
   appendMessage: (chatId: string, message: ChatMessage) => void;
   updateMessage: (chatId: string, messageId: string, patch: Partial<ChatMessage>) => void;
+  /**
+   * Keep `messageId` and everything before it, drop everything after.
+   * Used by message edit: editing an earlier question re-answers from there.
+   */
+  truncateAfterMessage: (chatId: string, messageId: string) => void;
 
   /* retrieval */
   spaceSelection: SpaceSelection;
@@ -888,6 +893,27 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const truncateAfterMessage = useCallback(
+    (chatId: string, messageId: string) => {
+      setChats((current) =>
+        current.map((chat) => {
+          if (chat.id !== chatId) return chat;
+          const index = chat.messages.findIndex((message) => message.id === messageId);
+          if (index < 0) return chat;
+          const next: ChatSession = {
+            ...chat,
+            messages: chat.messages.slice(0, index + 1),
+            updatedAt: Date.now(),
+          };
+          void localStore.chats.put(next);
+          void upsertChat(next);
+          return next;
+        }),
+      );
+    },
+    [],
+  );
+
   const activeChat = useMemo(
     () => chats.find((chat) => chat.id === activeChatId) ?? null,
     [chats, activeChatId],
@@ -991,6 +1017,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       saveChat,
       appendMessage,
       updateMessage,
+      truncateAfterMessage,
       spaceSelection,
       setSpaceSelection,
       retrieve,
@@ -1027,6 +1054,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       saveChat,
       appendMessage,
       updateMessage,
+      truncateAfterMessage,
       spaceSelection,
       retrieve,
       pendingPrompt,
