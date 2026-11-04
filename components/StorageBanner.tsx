@@ -80,7 +80,7 @@ export function StorageStatusChip() {
 
   if (!health) return null;
 
-  const ok = health.sessionPersistent && health.persistent !== false;
+  const ok = health.persistent !== false;
 
   return (
     <span
@@ -92,16 +92,16 @@ export function StorageStatusChip() {
       )}
       title={
         ok
-          ? `
-บันทึกอัตโนมัติ: เปิดใหม่ได้ตามปกติ
-โฮสต์: ${health.host}
-พื้นที่ใช้ไป: ${health.usageBytes ?? "?"} ไบต์ จาก ${health.quotaBytes ?? "?"}
-`.trim()
-          : `
-คำเตือน: เบราว์เซอร์ไม่ได้รับสิทธิ์เก็บข้อมูลถาวร และไม่พบ session pointer ใน localStorage
-โฮสต์: ${health.host}
-หากปิดเบราว์เซอร์แล้วกลับมาอาจต้องล็อกอินใหม่
-`.trim()
+          ? `origin: ${health.host}
+IndexedDB: ${health.indexedDbAvailable ? "available" : "unavailable"}
+localStorage session pointer: ${health.sessionPersistent ? "saved (survives restart)" : health.sessionEphemeral ? "tab-only (clears on close)" : "none yet — sign in to save"}
+durable storage: ${health.persistent === true ? "granted" : "not yet requested"}
+usage: ${health.usageBytes ?? "?"} / ${health.quotaBytes ?? "?"} bytes`.trim()
+          : `This browser can clear site data when it closes:
+origin: ${health.host}
+durable storage: not granted
+session pointer: ${health.sessionPersistent ? "saved in localStorage" : "not saved"}
+After a browser restart the session may be gone — sign out/sign in again, and avoid private windows or cleaners.`.trim()
       }
     >
       {ok ? (
