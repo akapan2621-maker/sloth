@@ -49,6 +49,13 @@ import {
   upsertSpace,
 } from "@/lib/supabase";
 import { uploadFileToBlob } from "@/lib/blobStorage";
+import {
+  cloudKeyFor,
+  CLOUD_SYNC_DEBOUNCE_MS,
+  loadWorkspaceSnapshot,
+  runInBackground,
+  saveWorkspaceSnapshot,
+} from "@/lib/cloudSync";
 import { setRemoteSyncUser } from "@/lib/authBackend";
 import type {
   ChatMessage,
@@ -196,6 +203,8 @@ export interface WorkspaceContextValue {
   supabaseEnabled: boolean;
   ingestProgress: IngestProgress[];
   clearIngestProgress: () => void;
+  /** Last time the workspace was mirrored to Vercel Blob (epoch ms). */
+  cloudSyncedAt: number | null;
 }
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
@@ -234,6 +243,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
    */
   const accountKey = authStatus === "ready" && authUser ? authUser.id : null;
   const isRemoteUser = authUser?.kind === "supabase";
+  /** Non-guest accounts mirror their workspace to Vercel Blob (see cloudSync). */
+  const cloudEmail =
+    authUser && authUser.kind !== "guest" ? authUser.email : null;
 
   /**
    * The account whose data is fully live in state. Kept apart from
@@ -322,6 +334,66 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
       if (cancelled) return;
 
+      // Pending lists become mutable so the Vercel Blob mirror can merge into
+      // them before seeding and migration run below.
+      let restoredSpaces = storedSpaces;
+      let restoredDocuments = storedDocuments;
+      let restoredChunks = storedChunks;
+      let restoredChats = storedChats;
+
+      // Vercel Blob mirror restore (local accounts): the snapshot is keyed by
+      // the account email, so a fresh browser or a new device pulls the same
+      // workspace back. A virgin namespace takes the whole snapshot; an
+      // existing workspace only adopts records it is missing — nothing local
+      // is ever deleted.
+      if (cloudEmail && !isRemoteUser) {
+        try {
+          const cloudKey = await cloudKeyFor(cloudEmail);
+          const snapshot = cloudKey
+            ? await loadWorkspaceSnapshot(cloudKey)
+            : null;
+          if (snapshot) {
+            const virgin =
+              restoredSpaces.length === 0 &&
+              restoredDocuments.length === 0 &&
+              restoredChunks.length === 0 &&
+              restoredChats.length === 0;
+
+            let spacesToAdopt = snapshot.spaces;
+            if (!virgin) {
+              const known = new Set(restoredSpaces.map((s) => s.id));
+              spacesToAdopt = snapshot.spaces.filter((s) => !known.has(s.id));
+            }
+            for (const space of spacesToAdopt) void localStore.spaces.put(space);
+            restoredSpaces = [...restoredSpaces, ...spacesToAdopt];
+
+            const docKnown = virgin ? new Set<string>() : new Set(restoredDocuments.map((d) => d.id));
+            const docsToAdopt = snapshot.documents.filter((d) => !docKnown.has(d.id));
+            for (const doc of docsToAdopt) void localStore.documents.put(doc);
+            restoredDocuments = [...restoredDocuments, ...docsToAdopt];
+
+            const chunkKnown = virgin ? new Set<string>() : new Set(restoredChunks.map((c) => c.id));
+            const chunksToAdopt = snapshot.chunks.filter((c) => !chunkKnown.has(c.id));
+            if (chunksToAdopt.length > 0) {
+              await localStore.chunks.putMany(chunksToAdopt);
+            }
+            restoredChunks = [...restoredChunks, ...chunksToAdopt];
+
+            const chatMap = new Map(restoredChats.map((c) => [c.id, c]));
+            for (const chat of snapshot.chats) {
+              void localStore.chats.put(chat);
+              const local = chatMap.get(chat.id);
+              if (!local || chat.updatedAt > local.updatedAt) {
+                chatMap.set(chat.id, chat);
+              }
+            }
+            restoredChats = [...chatMap.values()];
+          }
+        } catch (error) {
+          console.warn("[workspace] blob mirror restore skipped:", error);
+        }
+      }
+
       // Brand + prompt migration (self-healing): the saved system prompt is
       // sent to the model on every request, so a pre-rename copy would make new
       // answers introduce the app as "Amazon Quick" again. Stock prompts saved
@@ -351,7 +423,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         setSettings({ ...DEFAULT_SETTINGS, ...migratedSettings });
       }
 
-      let spaceList = storedSpaces;
+      let spaceList = restoredSpaces;
       if (spaceList.length === 0) {
         spaceList = SEED_SPACES;
         for (const space of SEED_SPACES) {
@@ -360,13 +432,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         }
       }
 
-      let documentList = sortByCreatedDesc(storedDocuments);
-      let chunkList = storedChunks;
+      let documentList = sortByCreatedDesc(restoredDocuments);
+      let chunkList = restoredChunks;
 
       // Same rewrite for assistant messages generated before the rename. This
       // runs on every hydration and only persists chats that actually
       // changed, so it is cheap and self-healing.
-      let chatList = storedChats;
+      let chatList = restoredChats;
       try {
         let changed = false;
         chatList = chatList.map((chat) => {
@@ -511,6 +583,81 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     }
     writeUiState(accountKey, { activeChatId, spaceSelection });
   }, [accountKey, hydrated, activeChatId, spaceSelection]);
+
+  /* Mirror the workspace to Vercel Blob (Vercel cloud storage). ------------ */
+  const [cloudSyncedAt, setCloudSyncedAt] = useState<number | null>(null);
+  const mirrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** True while the newest state has not reached the cloud yet. */
+  const cloudDirtyRef = useRef(false);
+
+  useEffect(() => {
+    // The same write guard as the ui-state effect above, plus a guest skip:
+    // guests have no account email so there is no stable key to mirror under.
+    if (
+      !accountKey ||
+      accountKey === "guest" ||
+      !cloudEmail ||
+      !hydrated ||
+      hydratedAccountRef.current !== accountKey
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    cloudDirtyRef.current = true;
+
+    const save = async (options?: { preferKeepalive?: boolean }) => {
+      try {
+        const cloudKey = await cloudKeyFor(cloudEmail);
+        if (!cloudKey || cancelled) return;
+        const result = await saveWorkspaceSnapshot(
+          cloudKey,
+          { spaces, documents, chunks, chats },
+          options,
+        );
+        if (result && !cancelled) {
+          cloudDirtyRef.current = false;
+          setCloudSyncedAt(Date.now());
+        }
+      } catch {
+        /* the mirror is best effort — the local workspace is the source */
+      }
+    };
+
+    if (mirrorTimerRef.current) clearTimeout(mirrorTimerRef.current);
+    mirrorTimerRef.current = setTimeout(() => {
+      // Deferred save runs when the browser is idle, so a long answer landing
+      // never competes with the mirror write for the main thread.
+      runInBackground(() => void save());
+    }, CLOUD_SYNC_DEBOUNCE_MS);
+
+    // Background guarantee: when the tab is hidden (switched apps/windows) or
+    // closed, flush the pending snapshot immediately instead of waiting for
+    // the debounce — a background tab's timers are throttled hard.
+    const flush = () => {
+      if (!cloudDirtyRef.current) return;
+      if (mirrorTimerRef.current) clearTimeout(mirrorTimerRef.current);
+      void save({ preferKeepalive: true });
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    const onOnline = () => {
+      if (cloudDirtyRef.current) void save();
+    };
+
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", flush);
+    window.addEventListener("online", onOnline);
+    return () => {
+      cancelled = true;
+      if (mirrorTimerRef.current) clearTimeout(mirrorTimerRef.current);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("online", onOnline);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountKey, cloudEmail, hydrated, spaces, documents, chunks, chats]);
 
   /* ------------------------------------------------------------------ */
   /* Settings                                                            */
@@ -1028,6 +1175,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       supabaseEnabled: isSupabaseConfigured && Boolean(getSupabase()),
       ingestProgress,
       clearIngestProgress,
+      cloudSyncedAt,
     }),
     [
       settings,
@@ -1063,6 +1211,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       backend,
       ingestProgress,
       clearIngestProgress,
+      cloudSyncedAt,
     ],
   );
 

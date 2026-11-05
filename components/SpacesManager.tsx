@@ -53,6 +53,7 @@ export function SpacesManager({ onClose }: SpacesManagerProps) {
     clearIngestProgress,
     backend,
     supabaseEnabled,
+    cloudSyncedAt,
   } = useWorkspace();
 
   const [activeSpaceId, setActiveSpaceId] = useState<string | null>(
@@ -171,6 +172,17 @@ export function SpacesManager({ onClose }: SpacesManagerProps) {
             </span>
           ) : null}
           <StorageStatusChip />
+          {cloudSyncedAt ? (
+            <span
+              className="inline-flex items-center gap-1.5 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-[11px] font-medium text-indigo-700"
+              title={`Workspace mirrored to Vercel Blob at ${new Date(
+                cloudSyncedAt,
+              ).toLocaleString()}`}
+            >
+              <Cloud className="h-3.5 w-3.5" />
+              Vercel cloud · {formatRelativeTime(cloudSyncedAt)}
+            </span>
+          ) : null}
           {onClose ? (
             <button
               type="button"
