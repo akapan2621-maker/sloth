@@ -63,7 +63,7 @@ export function StorageBanner() {
 /**
  * Compact chip for the workspace shell / login card: shows whether the
  * browser will actually keep the data. Amber when durable-storage is not
- * granted and no session pointer is saved in localStorage.
+ * granted.
  */
 export function StorageStatusChip() {
   const [health, setHealth] = useState<StorageHealth | null>(null);
@@ -94,13 +94,13 @@ export function StorageStatusChip() {
         ok
           ? `origin: ${health.host}
 IndexedDB: ${health.indexedDbAvailable ? "available" : "unavailable"}
-localStorage session pointer: ${health.sessionPersistent ? "saved (survives restart)" : health.sessionEphemeral ? "tab-only (clears on close)" : "none yet — sign in to save"}
+session pointer: ${health.sessionActive ? "active in this tab" : "not signed in"}
 durable storage: ${health.persistent === true ? "granted" : "not yet requested"}
 usage: ${health.usageBytes ?? "?"} / ${health.quotaBytes ?? "?"} bytes`.trim()
           : `This browser can clear site data when it closes:
 origin: ${health.host}
 durable storage: not granted
-session pointer: ${health.sessionPersistent ? "saved in localStorage" : "not saved"}
+session pointer: ${health.sessionActive ? "active in this tab" : "not signed in"}
 After a browser restart the session may be gone — sign out/sign in again, and avoid private windows or cleaners.`.trim()
       }
     >

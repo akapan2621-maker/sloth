@@ -34,7 +34,7 @@ interface AuthContextValue {
   mode: "local" | "supabase";
   accounts: { email: string; name: string }[];
 
-  signIn: (email: string, password: string, remember?: boolean) => Promise<void>;
+  signIn: (email: string, password: string) => Promise<void>;
   signUp: (name: string, email: string, password: string) => Promise<void>;
   signInAsGuest: () => Promise<void>;
   signOutUser: () => Promise<void>;
@@ -82,11 +82,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signIn = useCallback(
-    async (email: string, password: string, remember = true) => {
+    async (email: string, password: string) => {
       const next =
         authMode === "supabase"
-          ? await supabaseSignIn(email, password, remember)
-          : await localSignIn(email, password, remember);
+          ? await supabaseSignIn(email, password)
+          : await localSignIn(email, password);
       if (!mountedRef.current) return;
       setUser(next);
       setAccounts(listLocalAccounts());

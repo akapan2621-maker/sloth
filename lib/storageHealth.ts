@@ -3,7 +3,7 @@
  *
  * Everything the workspace saves lives in the browser origin (localStorage +
  * IndexedDB), so persisted data is bound to the *exact* URL the app is opened
- * from. That is the usual reason "closing the browser lost my session":
+ * from. That is the usual reason "closing the browser lost my data":
  *
  *  1. The app was opened from a per-deployment Vercel subdomain
  *     (`sloth-ai-workspace-<hash>-akapans-projects.vercel.app`) instead of the
@@ -11,8 +11,12 @@
  *     origin with completely separate storage.
  *  2. The browser is set to clear site data when it closes, or a cleaner tool
  *     wipes it.
- *  3. The session pointer was saved in sessionStorage (remember unchecked), or
- *     the browser was private/incognito.
+ *  3. The browser is private/incognito.
+ *
+ * Note that the *login* is sessionStorage-only by design: every fresh browser
+ * session shows the login screen, while reloading a tab stays signed in. The
+ * workspace data itself is durable and rehydrates from Vercel Blob after the
+ * user signs in.
  *
  * `readStorageHealth()` surfaces all of these so the UI can show it instead of
  * the user having to guess.
@@ -30,10 +34,8 @@ export interface StorageHealth {
   isCanonical: boolean;
   /** Local development host — expected, never warn. */
   isLocal: boolean;
-  /** A session pointer exists in localStorage (survives a browser restart). */
-  sessionPersistent: boolean;
-  /** A session pointer exists, but only in sessionStorage (dies with the tab). */
-  sessionEphemeral: boolean;
+  /** A session pointer exists in sessionStorage (this tab is signed in). */
+  sessionActive: boolean;
   /** navigator.storage.persisted() — granted durable-storage exemption. */
   persistent: boolean | null;
   usageBytes: number | null;
@@ -69,8 +71,7 @@ export async function readStorageHealth(): Promise<StorageHealth> {
     host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0";
   const isCanonical = host === CANONICAL_HOST || isLocal;
 
-  const sessionPersistent = safeGet("local", SESSION_KEY);
-  const sessionEphemeral = !sessionPersistent && safeGet("session", SESSION_KEY);
+  const sessionActive = safeGet("session", SESSION_KEY);
 
   let persistent: boolean | null = null;
   let usageBytes: number | null = null;
@@ -100,8 +101,7 @@ export async function readStorageHealth(): Promise<StorageHealth> {
     origin,
     isCanonical,
     isLocal,
-    sessionPersistent,
-    sessionEphemeral,
+    sessionActive,
     persistent,
     usageBytes,
     quotaBytes,

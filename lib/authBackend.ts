@@ -49,7 +49,6 @@ export function remoteSyncActive(): boolean {
 
 interface SessionPointer {
   userId: string;
-  remember: boolean;
   at: number;
 }
 
@@ -78,9 +77,18 @@ function safeSetWithRemove(storage: "local" | "session", key: string, raw: strin
   }
 }
 
+/**
+ * The login lives in sessionStorage on purpose: closing the browser (or the
+ * tab) ends the session, so opening the app again always shows the login
+ * screen first. Reloading the tab keeps you signed in — that is what makes a
+ * refresh look seamless without weakening the gate.
+ *
+ * Older builds also wrote a localStorage pointer ("stay signed in"); that
+ * pointer is purged here so an upgrade cannot silently auto-login.
+ */
 function setSessionPointer(pointer: SessionPointer): void {
   const raw = JSON.stringify(pointer);
-  safeSetWithRemove(pointer.remember ? "local" : "session", SESSION_KEY, raw);
+  safeSetWithRemove("session", SESSION_KEY, raw);
 }
 
 async function clearSessionPointer(): Promise<void> {
@@ -224,7 +232,7 @@ export async function localSignUp(options: {
   };
 
   writeAccounts([...accounts, account]);
-  setSessionPointer({ userId: account.id, remember: true, at: Date.now() });
+  setSessionPointer({ userId: account.id, at: Date.now() });
 
   return { id: account.id, email: account.email, name: account.name, kind: "local" };
 }
@@ -232,7 +240,6 @@ export async function localSignUp(options: {
 export async function localSignIn(
   email: string,
   password: string,
-  remember = true,
 ): Promise<WorkspaceUser> {
   const accounts = readAccounts();
   const account = accounts.find(
@@ -251,7 +258,7 @@ export async function localSignIn(
     throw new Error("Email or password is not correct.");
   }
 
-  setSessionPointer({ userId: account.id, remember, at: Date.now() });
+  setSessionPointer({ userId: account.id, at: Date.now() });
   return { id: account.id, email: account.email, name: account.name, kind: "local" };
 }
 
@@ -342,7 +349,6 @@ function mapAuthError(message: string): string {
 export async function supabaseSignIn(
   email: string,
   password: string,
-  remember = true,
 ): Promise<WorkspaceUser> {
   const client = getSupabase();
   if (!client) throw new Error("Sign in is not configured.");
@@ -355,7 +361,6 @@ export async function supabaseSignIn(
 
   setSessionPointer({
     userId: data.user.id,
-    remember,
     at: Date.now(),
   });
   return mapSupabaseUser(data.user);
@@ -402,7 +407,7 @@ export function guestUser(): WorkspaceUser {
 
 /** Guest keeps the legacy (pre-login) workspace namespace. */
 export async function continueAsGuest(): Promise<WorkspaceUser> {
-  setSessionPointer({ userId: "guest", remember: true, at: Date.now() });
+  setSessionPointer({ userId: "guest", at: Date.now() });
   return { ...GUEST };
 }
 
@@ -411,16 +416,21 @@ export async function continueAsGuest(): Promise<WorkspaceUser> {
 /* -------------------------------------------------------------------------- */
 
 export async function restoreSession(): Promise<WorkspaceUser | null> {
+  // A legacy "stay signed in" pointer must not auto-open the workspace: the
+  // login gate is mandatory for every fresh browser session now.
+  try {
+    localStorage.removeItem(SESSION_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+
+  const raw = safeGet("session", SESSION_KEY);
+  if (!raw) return null;
   let pointer: SessionPointer | null = null;
-  for (const storage of ["local", "session"] as const) {
-    const raw = safeGet(storage, SESSION_KEY);
-    if (!raw) continue;
-    try {
-      pointer = JSON.parse(raw) as SessionPointer;
-      break;
-    } catch {
-      /* skip */
-    }
+  try {
+    pointer = JSON.parse(raw) as SessionPointer;
+  } catch {
+    return null;
   }
   if (!pointer?.userId) return null;
 

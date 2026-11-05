@@ -31,7 +31,6 @@ export function AuthScreen() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [remember, setRemember] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -42,7 +41,7 @@ export function AuthScreen() {
     setError(null);
     try {
       if (tab === "signin") {
-        await signIn(email, password, remember);
+        await signIn(email, password);
       } else {
         await signUp(name, email, password);
       }
@@ -192,15 +191,11 @@ export function AuthScreen() {
               </div>
             </div>
 
-            <label className="flex cursor-pointer items-center gap-2 text-[12.5px] text-slate-600">
-              <input
-                type="checkbox"
-                checked={remember}
-                onChange={(event) => setRemember(event.target.checked)}
-                className="h-3.5 w-3.5 rounded border-slate-300 accent-purple-600"
-              />
-              Stay signed in on this device
-            </label>
+            <p className="flex items-start gap-2 rounded-xl bg-slate-50 px-3 py-2 text-[11.5px] leading-5 text-slate-500">
+              <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
+              เพื่อความปลอดภัย ต้องเข้าสู่ระบบใหม่ทุกครั้งที่เปิดเบราว์เซอร์
+              (รีเฟรชหน้านี้ยังอยู่ในเซสชันเดิม)
+            </p>
 
             {error ? (
               <div className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-[12.5px] text-rose-700">
