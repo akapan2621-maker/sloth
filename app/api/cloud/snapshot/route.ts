@@ -54,6 +54,60 @@ export async function POST(request: Request) {
   }
 
   const pathname = `workspace-sync/${body.key}.json`;
+
+  /**
+   * Protection against erasing the user's history: an empty workspace
+   * (a client bug, a raced login, a wiped browser writing before it
+   * restored) must never overwrite a snapshot that still holds data. The
+   * mirror is non-destructive restore anyway, so refusing an empty write
+   * only ever *saves* content.
+   */
+  try {
+    const incoming = JSON.parse(body.data) as {
+      spaces?: unknown[];
+      documents?: unknown[];
+      chunks?: unknown[];
+      chats?: unknown[];
+    };
+    const incomingEmpty =
+      (!incoming.spaces || incoming.spaces.length === 0) &&
+      (!incoming.documents || incoming.documents.length === 0) &&
+      (!incoming.chunks || incoming.chunks.length === 0) &&
+      (!incoming.chats || incoming.chats.length === 0);
+    if (incomingEmpty) {
+      const existing = await fetch(
+        `${new URL(request.url).origin}/api/cloud/snapshot?key=${body.key}`,
+      );
+      if (existing.ok) {
+        const current = (await existing.json()) as Partial<{
+          spaces: unknown[];
+          documents: unknown[];
+          chunks: unknown[];
+          chats: unknown[];
+          savedAt: number;
+        }>;
+        const currentNonEmpty =
+          (current.spaces?.length ?? 0) > 0 ||
+          (current.documents?.length ?? 0) > 0 ||
+          (current.chunks?.length ?? 0) > 0 ||
+          (current.chats?.length ?? 0) > 0;
+        if (currentNonEmpty) {
+          const savedAt = Number(current.savedAt ?? Date.now());
+          return NextResponse.json(
+            {
+              skipped: true,
+              reason: "Refusing to overwrite a non-empty snapshot with an empty workspace.",
+              savedAt,
+            },
+            { status: 409 },
+          );
+        }
+      }
+    }
+  } catch {
+    /* the payload itself is validated below — still store it */
+  }
+
   try {
     const blob = await put(pathname, body.data, {
       access: "public",

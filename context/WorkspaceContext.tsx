@@ -258,6 +258,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const hydratedAccountRef = useRef<string | null>(null);
 
   /**
+   * Accounts whose hydration (and any cloud restore) has completed at least
+   * once. The mirror effect below must not write until this flag is set for
+   * the current login: otherwise a slow snapshot fetch leaves the mirror
+   * running with an empty in-memory workspace, which would then OVERWRITE
+   * the cloud snapshot with nothing — permanently erasing the user's history.
+   */
+  const restoredAccountsRef = useRef<Set<string>>(new Set());
+
+  /**
    * BM25 index cache. Rebuilding it over a large Space (tens of thousands of
    * chunks) on every message blocks the UI, so keep one index per scope until
    * the underlying chunk list changes.
@@ -349,15 +358,38 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       if (cloudEmail && !isRemoteUser) {
         try {
           const cloudKey = await cloudKeyFor(cloudEmail);
-          const snapshot = cloudKey
-            ? await loadWorkspaceSnapshot(cloudKey)
-            : null;
+          // A namespace is "virgin" when nothing is stored yet — exactly the
+          // state of a wiped browser or a brand new device, where the mirror
+          // is the only copy of the user's history.
+          const virgin =
+            restoredSpaces.length === 0 &&
+            restoredDocuments.length === 0 &&
+            restoredChunks.length === 0 &&
+            restoredChats.length === 0;
+          if (virgin && cloudKey) {
+            console.info(
+              "[workspace] empty namespace — restoring from the Vercel mirror",
+            );
+          }
+          let snapshot = cloudKey ? await loadWorkspaceSnapshot(cloudKey) : null;
+          if (!snapshot && virgin && cloudKey && !cancelled) {
+            // The first read can race a fresh deployment or a flaky network
+            // and silently return nothing. Without a retry the mirror effect
+            // would conclude "this login owns only these new chats" and
+            // overwrite the real snapshot — so try once more.
+            await new Promise((resolve) => setTimeout(resolve, 1_500));
+            snapshot = await loadWorkspaceSnapshot(cloudKey);
+            if (snapshot) {
+              console.info(
+                "[workspace] mirror restored on the retry fetch",
+              );
+            } else {
+              console.warn(
+                "[workspace] mirror restore returned nothing twice — workspace starts empty (existing cloud snapshot is left untouched)",
+              );
+            }
+          }
           if (snapshot) {
-            const virgin =
-              restoredSpaces.length === 0 &&
-              restoredDocuments.length === 0 &&
-              restoredChunks.length === 0 &&
-              restoredChats.length === 0;
 
             let spacesToAdopt = snapshot.spaces;
             if (!virgin) {
@@ -557,7 +589,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
       if (!cancelled) {
         // Only now is this account's data live in state — open the
-        // persistence gate (the write guard) for exactly this account.
+        // persistence gate (the write guard) for exactly this account. The
+        // mirror gate opens with it: nothing may reach Vercel Blob before
+        // this login's cloud restore attempt has fully completed.
+        restoredAccountsRef.current.add(accountKey);
         hydratedAccountRef.current = accountKey;
         setHydrated(true);
       }
@@ -598,7 +633,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       accountKey === "guest" ||
       !cloudEmail ||
       !hydrated ||
-      hydratedAccountRef.current !== accountKey
+      hydratedAccountRef.current !== accountKey ||
+      // Critical ordering guard: wait until this account's snapshot restore
+      // attempt has finished, so a slow / failed fetch can never push an
+      // empty workspace over the mirror and erase the real history.
+      !restoredAccountsRef.current.has(accountKey)
     ) {
       return;
     }
