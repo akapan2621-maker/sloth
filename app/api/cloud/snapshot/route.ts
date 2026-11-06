@@ -56,52 +56,61 @@ export async function POST(request: Request) {
   const pathname = `workspace-sync/${body.key}.json`;
 
   /**
-   * Protection against erasing the user's history: an empty workspace
-   * (a client bug, a raced login, a wiped browser writing before it
-   * restored) must never overwrite a snapshot that still holds data. The
-   * mirror is non-destructive restore anyway, so refusing an empty write
-   * only ever *saves* content.
+   * Protection against erasing the user's history: a write that would drop
+   * the entire chat history (a stale tab, a bug, a raced login) is refused —
+   * the stored snapshot stays intact. Deleting Spaces or documents is still
+   * allowed, because "clean up my Spaces" is a normal user action. An empty
+   * workspace must also never overwrite a non-empty snapshot.
    */
   try {
     const incoming = JSON.parse(body.data) as {
       spaces?: unknown[];
       documents?: unknown[];
-      chunks?: unknown[];
       chats?: unknown[];
+      chunks?: unknown[];
     };
-    const incomingEmpty =
-      (!incoming.spaces || incoming.spaces.length === 0) &&
-      (!incoming.documents || incoming.documents.length === 0) &&
-      (!incoming.chunks || incoming.chunks.length === 0) &&
-      (!incoming.chats || incoming.chats.length === 0);
-    if (incomingEmpty) {
-      const existing = await fetch(
-        `${new URL(request.url).origin}/api/cloud/snapshot?key=${body.key}`,
-      );
-      if (existing.ok) {
-        const current = (await existing.json()) as Partial<{
-          spaces: unknown[];
-          documents: unknown[];
-          chunks: unknown[];
-          chats: unknown[];
-          savedAt: number;
-        }>;
-        const currentNonEmpty =
-          (current.spaces?.length ?? 0) > 0 ||
-          (current.documents?.length ?? 0) > 0 ||
-          (current.chunks?.length ?? 0) > 0 ||
-          (current.chats?.length ?? 0) > 0;
-        if (currentNonEmpty) {
-          const savedAt = Number(current.savedAt ?? Date.now());
-          return NextResponse.json(
-            {
-              skipped: true,
-              reason: "Refusing to overwrite a non-empty snapshot with an empty workspace.",
-              savedAt,
-            },
-            { status: 409 },
-          );
-        }
+    const existing = await fetch(
+      `${new URL(request.url).origin}/api/cloud/snapshot?key=${body.key}`,
+    );
+    if (existing.ok) {
+      const current = (await existing.json()) as Partial<{
+        spaces: unknown[];
+        documents: unknown[];
+        chunks: unknown[];
+        chats: unknown[];
+        savedAt: number;
+      }>;
+      const droppedChats =
+        (incoming.chats?.length ?? 0) === 0 && (current.chats?.length ?? 0) > 0;
+      if (droppedChats) {
+        return NextResponse.json(
+          {
+            skipped: true,
+            reason: "Refusing to drop the entire chat history from the snapshot.",
+            savedAt: Number(current.savedAt ?? Date.now()),
+          },
+          { status: 409 },
+        );
+      }
+      const incomingEmpty =
+        (incoming.spaces?.length ?? 0) === 0 &&
+        (incoming.documents?.length ?? 0) === 0 &&
+        (incoming.chunks?.length ?? 0) === 0 &&
+        (incoming.chats?.length ?? 0) === 0;
+      const currentNonEmpty =
+        (current.spaces?.length ?? 0) > 0 ||
+        (current.documents?.length ?? 0) > 0 ||
+        (current.chunks?.length ?? 0) > 0 ||
+        (current.chats?.length ?? 0) > 0;
+      if (incomingEmpty && currentNonEmpty) {
+        return NextResponse.json(
+          {
+            skipped: true,
+            reason: "Refusing to overwrite a non-empty snapshot with an empty workspace.",
+            savedAt: Number(current.savedAt ?? Date.now()),
+          },
+          { status: 409 },
+        );
       }
     }
   } catch {

@@ -21,9 +21,11 @@ import { parseFile } from "@/lib/fileParser";
 import { embedTexts, resetEmbeddingCapability } from "@/lib/embeddings";
 import {
   getNamespace,
+  getKv,
   localStore,
   migrateLegacyToNamespace,
   setNamespace,
+  setKv,
   storageBackend,
 } from "@/lib/localDb";
 import {
@@ -349,6 +351,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       let restoredDocuments = storedDocuments;
       let restoredChunks = storedChunks;
       let restoredChats = storedChats;
+      /** True when the account's cloud mirror exists (it had a workspace). */
+      let cloudSnapshotFound = false;
 
       // Vercel Blob mirror restore (local accounts): the snapshot is keyed by
       // the account email, so a fresh browser or a new device pulls the same
@@ -390,6 +394,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
             }
           }
           if (snapshot) {
+            cloudSnapshotFound = true;
 
             let spacesToAdopt = snapshot.spaces;
             if (!virgin) {
@@ -456,13 +461,21 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       }
 
       let spaceList = restoredSpaces;
-      if (spaceList.length === 0) {
+      // Demo/Sample Spaces are only for a brand-new workspace. Once this
+      // account has been hydrated once, an empty Space list means the user
+      // deleted them (locally and in the mirror) — re-seeding would resurrect
+      // exactly the Spaces they just removed.
+      const workspaceInitialized = await getKv<boolean>("workspace-initialized");
+      if (spaceList.length === 0 && !workspaceInitialized && !cloudSnapshotFound) {
         spaceList = SEED_SPACES;
         for (const space of SEED_SPACES) {
           await localStore.spaces.put(space);
           void upsertSpace(space);
         }
       }
+      // Mark this namespace as initialized from now on — best effort, and
+      // IMPORTANTLY independent of whether Spaces exist right now.
+      await setKv("workspace-initialized", true);
 
       let documentList = sortByCreatedDesc(restoredDocuments);
       let chunkList = restoredChunks;
@@ -624,6 +637,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const mirrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** True while the newest state has not reached the cloud yet. */
   const cloudDirtyRef = useRef(false);
+  /**
+   * Set by destructive actions (delete Space / document / chat): the very
+   * next mirror effect run must skip the 3s debounce. Otherwise a user who
+   * deletes something and closes the window right away loses that deletion —
+   * the cloud snapshot still lists it, and the next login resurrects it.
+   */
+  const immediateMirrorRef = useRef(false);
 
   useEffect(() => {
     // The same write guard as the ui-state effect above, plus a guest skip:
@@ -645,6 +665,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     cloudDirtyRef.current = true;
 
+    // Destructive actions skip the debounce: this run must reach the cloud
+    // promptly, using the freshest state of THIS render.
+    const immediate = immediateMirrorRef.current;
+    immediateMirrorRef.current = false;
+
     const save = async (options?: { preferKeepalive?: boolean }) => {
       try {
         const cloudKey = await cloudKeyFor(cloudEmail);
@@ -664,11 +689,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     };
 
     if (mirrorTimerRef.current) clearTimeout(mirrorTimerRef.current);
-    mirrorTimerRef.current = setTimeout(() => {
-      // Deferred save runs when the browser is idle, so a long answer landing
-      // never competes with the mirror write for the main thread.
-      runInBackground(() => void save());
-    }, CLOUD_SYNC_DEBOUNCE_MS);
+    if (immediate) {
+      void save();
+    } else {
+      mirrorTimerRef.current = setTimeout(() => {
+        // Deferred save runs when the browser is idle, so a long answer landing
+        // never competes with the mirror write for the main thread.
+        runInBackground(() => void save());
+      }, CLOUD_SYNC_DEBOUNCE_MS);
+    }
 
     // Background guarantee: when the tab is hidden (switched apps/windows) or
     // closed, flush the pending snapshot immediately instead of waiting for
@@ -812,6 +841,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const deleteSpace = useCallback((id: string) => {
+    immediateMirrorRef.current = true;
     setSpaces((current) => current.filter((space) => space.id !== id));
     setDocuments((current) => {
       const removed = current.filter((doc) => doc.spaceId === id);
@@ -831,6 +861,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const deleteDocument = useCallback((id: string) => {
+    immediateMirrorRef.current = true;
     setDocuments((current) => current.filter((doc) => doc.id !== id));
     setChunks((current) => {
       const removed = current.filter((chunk) => chunk.documentId === id);
@@ -1019,6 +1050,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const deleteChat = useCallback((id: string) => {
+    immediateMirrorRef.current = true;
     setChats((current) => current.filter((chat) => chat.id !== id));
     void localStore.chats.remove(id);
     void deleteChatRemote(id);
